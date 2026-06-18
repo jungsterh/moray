@@ -1,0 +1,60 @@
+# Structs, methods, and interfaces in Moray.
+
+interface Describable {
+    fn describe(self)
+}
+
+struct Point {
+    int x
+    int y
+}
+
+impl Point {
+    fn dist(self) {
+        return self.x + self.y
+    }
+    fn shift(self, int dx, int dy) {
+        self.x = self.x + dx
+        self.y = self.y + dy
+    }
+}
+
+Point implement Describable {
+    fn describe(self) {
+        print("Point at")
+        print(self.x)
+        print(self.y)
+    }
+}
+
+# Construction: positional, and positional + named (named must come last)
+Point a = Point(3, 4)
+Point b = Point(10, y = 20)
+
+print(a.x)              # 3
+print(b.y)              # 20
+print(a.dist())        # 7
+print(type(a))         # Point
+
+# Field assignment
+a.x = 9
+print(a.x)             # 9
+
+# Methods can mutate self (structs are reference types)
+b.shift(1, 2)
+print(b.x)             # 11
+print(b.y)             # 22
+
+# Interface method
+a.describe()           # Point at / 9 / 4
+
+# Reference semantics: aliasing shares the instance
+Point c = a
+c.x = 100
+print(a.x)             # 100  (same instance)
+
+# Identity equality
+print(a == c)          # true
+print(a == b)          # false
+
+print(a)               # Point(x: 100, y: 4)

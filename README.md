@@ -28,6 +28,8 @@ print(factorial(6))   # 720
   - [Strings](#strings)
   - [Control flow](#control-flow)
   - [Functions](#functions)
+  - [Lists & maps](#lists--maps)
+  - [Structs & interfaces](#structs--interfaces)
   - [Truthiness](#truthiness)
   - [Scope](#scope)
 - [Built-in functions](#built-in-functions)
@@ -78,18 +80,23 @@ int x = 1   # trailing comments work too
 
 ### Types
 
-Moray has four value types plus `null`:
-
-| Type     | Keyword  | Literals                  | Backing C type |
-|----------|----------|---------------------------|----------------|
-| Integer  | `int`    | `42`, `-7`, `0`           | `long`         |
-| Float    | `float`  | `3.14`, `0.5`             | `double`       |
-| String   | `string` | `"hello"`                 | `char *`       |
-| Boolean  | `bool`   | `true`, `false`           | `int`          |
-| Null     | —        | `null`                    | —              |
+| Type     | Keyword  | Literals / construction        | Semantics |
+|----------|----------|--------------------------------|-----------|
+| Integer  | `int`    | `42`, `-7`, `0`                | value     |
+| Float    | `float`  | `3.14`, `0.5`                  | value     |
+| String   | `string` | `"hello"`                      | value     |
+| Boolean  | `bool`   | `true`, `false`                | value     |
+| List     | `list`   | `[1, 2, 3]`                    | reference |
+| Map      | `map`    | `{"a": 1}`                     | reference |
+| Struct   | *name*   | `Point(3, 4)` (see below)      | reference |
+| Null     | —        | `null`                         | value     |
 
 Numeric literals without a fractional part are stored as `int`; literals with a
 `.` are `float`. There is no `null` type keyword — `null` is only a value.
+
+**Value vs. reference.** Numbers, booleans, and strings are values. Lists, maps,
+and structs are *references*: assigning or passing one shares the same
+underlying object rather than copying it (see [Structs](#structs--interfaces)).
 
 ### Variables
 
@@ -216,6 +223,112 @@ print(add(2, 3))   # 5
 - Functions are defined in the global scope and can call other globally-defined
   functions.
 
+Arguments may be passed positionally or by name, with named arguments after the
+positional ones (as in Python):
+
+```my
+fn make(int a, int b) { return a + b }
+
+make(1, 2)            # positional
+make(1, b = 2)        # last argument named
+make(a = 1, b = 2)    # all named
+```
+
+### Lists & maps
+
+Lists are ordered and indexed from `0`; maps associate string keys with values.
+Both are reference types and can hold values of any type.
+
+```my
+list nums = [1, 2, 3]
+push(nums, 4)
+print(nums[0])        # 1
+print(len(nums))      # 4
+print(pop(nums))      # 4  (removes and returns the last element)
+
+map person = {"name": "Ada", "age": 36}
+print(person["name"]) # Ada
+print(has(person, "name"))   # true
+print(len(person))    # 2
+```
+
+See [`len`, `push`, `pop`, `has`](#built-in-functions) below.
+
+### Structs & interfaces
+
+Moray models user types with **structs** (data) and **interfaces** (contracts),
+with no inheritance. A struct's behavior is split into explicit blocks, and the
+interpreter *enforces* where those blocks live — there is no way to scatter a
+type's methods across the file.
+
+```my
+struct Point {
+    int x
+    int y
+}
+
+impl Point {              # a struct's own methods — at most ONE impl block
+    fn dist(self) {
+        return self.x + self.y
+    }
+    fn shift(self, int dx, int dy) {
+        self.x = self.x + dx   # methods can mutate self
+        self.y = self.y + dy
+    }
+}
+```
+
+**Construction** reuses call syntax: positional, with optional trailing named
+arguments (Python ordering). **Fields** and **methods** are reached with `.`:
+
+```my
+Point a = Point(3, 4)
+Point b = Point(10, y = 20)
+
+print(a.x)            # 3        field access
+a.x = 9               # field assignment
+print(a.dist())      # 13       method call
+print(type(a))       # Point    type() reports the struct's name
+```
+
+Structs are **reference types** — assigning shares the instance:
+
+```my
+Point c = a
+c.x = 100
+print(a.x)           # 100  (a and c are the same instance)
+print(a == c)        # true (identity comparison)
+```
+
+**Interfaces** declare required method signatures. A struct opts in with an
+explicit, subject-first `Type implement Interface` block, and conformance is
+checked **at load time** (before any code runs) — a missing method is an error,
+not a surprise later:
+
+```my
+interface Describable {
+    fn describe(self)          # signature only, no body
+}
+
+Point implement Describable {
+    fn describe(self) {
+        print(self.x)
+        print(self.y)
+    }
+}
+
+a.describe()         # methods from implement blocks are called like any other
+```
+
+Rules the interpreter enforces:
+
+- **One `impl` block per struct.** A second `impl Point { … }` is a load error.
+- **No duplicate methods.** A method name may be defined once across the `impl`
+  and `implement` blocks.
+- **Load-time conformance.** `T implement I` must define every method `I`
+  requires; otherwise the program fails before running.
+- `self` is the receiver — an ordinary first parameter, written without a type.
+
 ### Truthiness
 
 `if` and `while` accept any value as a condition:
@@ -266,23 +379,32 @@ program     = statement* ;
 statement   = var_decl
             | assignment
             | fn_def
+            | struct_def | interface_def | impl | implement
             | return_stmt
             | if_stmt
             | while_stmt
             | expr_stmt ;
 
-var_decl    = type IDENT "=" expression ;
-assignment  = IDENT "=" expression ;
+var_decl    = ( type | IDENT ) IDENT "=" expression ;   (* IDENT type = struct *)
+assignment  = lvalue "=" expression ;
+lvalue      = IDENT | postfix "." IDENT ;               (* variable or field   *)
 fn_def      = "fn" IDENT "(" params? ")" block ;
 params      = param ( "," param )* ;
-param       = type IDENT ;
+param       = type? IDENT ;                             (* untyped param = self *)
+
+struct_def    = "struct" IDENT "{" ( type IDENT )* "}" ;
+interface_def = "interface" IDENT "{" fn_sig* "}" ;
+fn_sig        = "fn" IDENT "(" params? ")" ;            (* signature, no body  *)
+impl          = "impl" IDENT "{" fn_def* "}" ;
+implement     = IDENT "implement" IDENT "{" fn_def* "}" ;  (* struct implement interface *)
+
 return_stmt = "return" expression? ;
 if_stmt     = "if" expression block ( "else" block )? ;
 while_stmt  = "while" expression block ;
 expr_stmt   = expression ;
 block       = "{" statement* "}" ;
 
-type        = "int" | "float" | "string" | "bool" ;
+type        = "int" | "float" | "string" | "bool" | "list" | "map" ;
 
 expression  = logic_or ;
 logic_or    = logic_and ( "||" logic_and )* ;
@@ -291,16 +413,23 @@ equality    = comparison ( ( "==" | "!=" ) comparison )* ;
 comparison  = term ( ( "<" | "<=" | ">" | ">=" ) term )* ;
 term        = factor ( ( "+" | "-" ) factor )* ;
 factor      = unary ( ( "*" | "/" | "%" ) unary )* ;
-unary       = ( "-" | "!" ) unary | primary ;
+unary       = ( "-" | "!" ) unary | postfix ;
+postfix     = primary ( "[" expression "]"
+                      | "." IDENT
+                      | "." IDENT "(" arguments? ")" )* ;
 primary     = NUMBER | STRING | "true" | "false" | "null"
             | IDENT
-            | IDENT "(" arguments? ")"
+            | IDENT "(" arguments? ")"        (* call or struct construction *)
+            | "[" ( expression ( "," expression )* )? "]"   (* list literal  *)
+            | "{" ( STRING ":" expression ( "," ... )* )? "}" (* map literal *)
             | "(" expression ")" ;
-arguments   = expression ( "," expression )* ;
+arguments   = arg ( "," arg )* ;
+arg         = expression | IDENT "=" expression ;      (* positional | named  *)
 ```
 
-**Reserved keywords:** `fn`, `return`, `if`, `else`, `while`,
-`true`, `false`, `null`, `int`, `float`, `string`, `bool`.
+**Reserved keywords:** `fn`, `return`, `if`, `else`, `while`, `struct`,
+`interface`, `impl`, `implement`, `true`, `false`, `null`,
+`int`, `float`, `string`, `bool`, `list`, `map`.
 
 Logical operators are symbolic: `&&` (and), `||` (or), `!` (not).
 
@@ -316,11 +445,18 @@ Moray is intentionally minimal. Things it does **not** have (yet):
 - No `for` loops, `break`, or `continue`.
 - No `else if` keyword (nest inside `else`).
 - No string escape sequences (`\n`, `\t`, `\"`, …).
-- No user-defined types/structs.
-- No closures — functions only capture the global scope.
+- No inheritance or generics — structs use composition; interfaces give
+  polymorphism without a class hierarchy.
+- No index assignment (`list[0] = x`); use `push`/`pop`. Field assignment
+  (`p.x = 5`) *is* supported.
+- No closures — functions and methods only capture the global scope.
 - No module/import system.
-- A function call evaluates at most 64 arguments (fixed buffer).
-- Declared types are not statically enforced at runtime.
+- A call evaluates at most 64 arguments; a struct/function at most 64
+  fields/parameters (fixed buffers).
+- Declared types are not statically enforced at runtime (annotations are
+  documentation; values are dynamically typed).
+- No garbage collection — heap values are reclaimed by the OS at exit, not
+  during execution.
 
 ---
 
@@ -336,5 +472,6 @@ Moray is intentionally minimal. Things it does **not** have (yet):
 | `src/env.*`           | Lexically-scoped variable environments.              |
 | `src/vec.h`           | Tiny generic growable-vector macro.                  |
 | `src/main.c`          | Entry point: reads a `.my` file and runs it.         |
-| `examples/sample.my`  | Example program demonstrating the language.          |
+| `examples/sample.my`  | Primitives, lists, and maps.                         |
+| `examples/shapes.my`  | Structs, methods, and interfaces.                    |
 ```

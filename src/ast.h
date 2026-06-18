@@ -16,6 +16,8 @@ typedef enum {
     EXPR_LIST,      /* [1, 2, 3]     */
     EXPR_MAP,       /* {"a": 1}      */
     EXPR_INDEX,     /* x[0], m["k"]  */
+    EXPR_FIELD,     /* p.x           */
+    EXPR_METHOD,    /* p.dist(1, 2)  */
 } ExprKind;
 
 /* ── Statement kinds ──────────────────────────────────────────────── */
@@ -28,6 +30,11 @@ typedef enum {
     STMT_FN_DEF,    /* fn foo(a) {}  */
     STMT_EXPR,      /* bare expr     */
     STMT_BLOCK,     /* { stmts }     */
+    STMT_STRUCT_DEF,    /* struct Point { int x }            */
+    STMT_FIELD_ASSIGN,  /* p.x = 5                           */
+    STMT_IMPL,          /* impl Point { fn ... }             */
+    STMT_INTERFACE_DEF, /* interface Drawable { fn draw() }  */
+    STMT_IMPLEMENT,     /* implement Drawable for Point {}   */
 } StmtKind;
 
 /* ── Type annotation ──────────────────────────────────────────────── */
@@ -36,9 +43,10 @@ typedef enum {
     TYPE_FLOAT,
     TYPE_STRING,
     TYPE_BOOL,
-    TYPE_VOID,      /* for functions that don't return a value */
+    TYPE_VOID,      /* for functions that don't return a value; also untyped params like 'self' */
     TYPE_LIST,
     TYPE_MAP,
+    TYPE_STRUCT,    /* a user struct type, named by identifier (not enforced at runtime) */
 } MorayType;
 
 /* forward declare so Expr and Stmt can reference each other */
@@ -65,10 +73,17 @@ typedef struct {
     char *name;
 } Param;
 
+/* A call/method argument: positional (name == NULL) or named (name = "y"). */
+typedef struct {
+    char *name;   /* NULL if positional */
+    Expr *value;
+} Arg;
+
 vector_define(ExprPtr)
 vector_define(StmtPtr)
 vector_define(Param)
 vector_define(MapEntry)
+vector_define(Arg)
 
 /* ── Expressions ──────────────────────────────────────────────────── */
 struct Expr {
@@ -100,7 +115,7 @@ struct Expr {
 
         struct {                        /* EXPR_CALL             */
             char *name;
-            vector(ExprPtr) args;
+            vector(Arg) args;           /* positional and/or named */
         } call;
 
         vector(ExprPtr) list;           /* EXPR_LIST             */
@@ -111,6 +126,17 @@ struct Expr {
             Expr *object;               /* the list or map       */
             Expr *index;                /* the key or position   */
         } index;
+
+        struct {                        /* EXPR_FIELD            */
+            Expr *object;
+            char *name;
+        } field;
+
+        struct {                        /* EXPR_METHOD           */
+            Expr *object;
+            char *name;
+            vector(Arg) args;
+        } method;
     };
 };
 
@@ -156,6 +182,33 @@ struct Stmt {
         Expr *expr;                     /* STMT_EXPR             */
 
         vector(StmtPtr) block;          /* STMT_BLOCK            */
+
+        struct {                        /* STMT_STRUCT_DEF       */
+            char *name;
+            vector(Param) fields;       /* type + name pairs     */
+        } struct_def;
+
+        struct {                        /* STMT_FIELD_ASSIGN     */
+            Expr *object;
+            char *name;
+            Expr *value;
+        } field_assign;
+
+        struct {                        /* STMT_IMPL             */
+            char *struct_name;
+            vector(StmtPtr) methods;    /* each a STMT_FN_DEF     */
+        } impl;
+
+        struct {                        /* STMT_INTERFACE_DEF    */
+            char *name;
+            vector(StmtPtr) sigs;       /* STMT_FN_DEF, body NULL */
+        } interface_def;
+
+        struct {                        /* STMT_IMPLEMENT        */
+            char *interface_name;
+            char *struct_name;
+            vector(StmtPtr) methods;    /* each a STMT_FN_DEF     */
+        } implement;
     };
 };
 

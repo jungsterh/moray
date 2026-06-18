@@ -21,6 +21,91 @@ static void runtime_error(Interpreter *interp, int line, const char *msg) {
 static Value eval_expr(Interpreter *interp, Expr *e, Env *env);
 static void  exec_stmt(Interpreter *interp, Stmt *s, Env *env);
 
+/* ── Struct / interface registry helpers ──────────────────────────── */
+
+static void load_error(Interpreter *interp, int line, const char *msg) {
+    fprintf(stderr, "[line %d] Load error: %s\n", line, msg);
+    interp->had_error = 1;
+}
+
+static StructType *find_struct(Interpreter *interp, const char *name) {
+    for (int i = 0; i < interp->struct_count; i++)
+        if (strcmp(interp->structs[i].def->struct_def.name, name) == 0)
+            return &interp->structs[i];
+    return NULL;
+}
+
+static Stmt *find_interface(Interpreter *interp, const char *name) {
+    for (int i = 0; i < interp->interface_count; i++)
+        if (strcmp(interp->interfaces[i]->interface_def.name, name) == 0)
+            return interp->interfaces[i];
+    return NULL;
+}
+
+static Stmt *struct_find_method(StructType *st, const char *name) {
+    for (int i = 0; i < st->method_count; i++)
+        if (strcmp(st->method_names[i], name) == 0)
+            return st->methods[i];
+    return NULL;
+}
+
+/* Add a method to a struct's table, reporting a load error on a duplicate name
+   (a method may not be defined twice across the impl and implement blocks). */
+static void type_add_method(Interpreter *interp, StructType *st, Stmt *fn, int line) {
+    if (struct_find_method(st, fn->fn_def.name)) {
+        fprintf(stderr, "[line %d] Load error: duplicate method '%s' on struct '%s'\n",
+                line, fn->fn_def.name, st->def->struct_def.name);
+        interp->had_error = 1;
+        return;
+    }
+    if (st->method_count >= MAX_METHODS) { load_error(interp, line, "Too many methods on struct"); return; }
+    st->method_names[st->method_count] = fn->fn_def.name;
+    st->methods[st->method_count]      = fn;
+    st->method_count++;
+}
+
+/*
+ * Evaluate call arguments into slots named by `slot_names` (a function's
+ * parameters or a struct's fields). Positional arguments fill slots in order;
+ * named arguments fill by matching name. Unfilled slots default to null.
+ * Returns 0 (and flags a runtime error) on too many positional args, an unknown
+ * named slot, or a slot filled twice.
+ */
+static int bind_args(Interpreter *interp, vector(Arg) args, Env *env,
+                     const char **slot_names, int slot_count,
+                     Value *out, int line) {
+    int filled[64] = {0};
+    if (slot_count > 64) { runtime_error(interp, line, "Too many parameters or fields"); return 0; }
+    for (int i = 0; i < slot_count; i++) out[i] = val_null();
+
+    int pi = 0;
+    for (int i = 0; i < args.len; i++) {
+        Arg a = args.data[i];
+        if (a.name == NULL) {                       /* positional */
+            if (pi >= slot_count) { runtime_error(interp, line, "Too many arguments"); return 0; }
+            out[pi] = eval_expr(interp, a.value, env);
+            filled[pi++] = 1;
+        } else {                                    /* named */
+            int j = -1;
+            for (int k = 0; k < slot_count; k++)
+                if (strcmp(slot_names[k], a.name) == 0) { j = k; break; }
+            if (j < 0) {
+                runtime_error(interp, line, "No parameter or field with that name");
+                fprintf(stderr, "  '%s'\n", a.name);
+                return 0;
+            }
+            if (filled[j]) {
+                runtime_error(interp, line, "Argument given twice");
+                fprintf(stderr, "  '%s'\n", a.name);
+                return 0;
+            }
+            out[j] = eval_expr(interp, a.value, env);
+            filled[j] = 1;
+        }
+    }
+    return 1;
+}
+
 /* ── Built-in functions ───────────────────────────────────────────── */
 static Value call_builtin(Interpreter *interp, const char *name,
                           Value *args, int argc, int line) {
@@ -34,7 +119,11 @@ static Value call_builtin(Interpreter *interp, const char *name,
     }
     if (strcmp(name, "type") == 0) {
         if (argc != 1) { runtime_error(interp, line, "type() takes 1 argument"); return val_null(); }
-        return val_string(value_type_name(args[0].type), strlen(value_type_name(args[0].type)));
+        /* structs report their own type name, not the generic "struct" */
+        const char *tn = args[0].type == VAL_STRUCT
+                       ? args[0].strukt->type_name
+                       : value_type_name(args[0].type);
+        return val_string(tn, strlen(tn));
     }
     if (strcmp(name, "int") == 0) {
         if (argc != 1) { runtime_error(interp, line, "int() takes 1 argument"); return val_null(); }
@@ -133,6 +222,7 @@ static Value eval_expr(Interpreter *interp, Expr *e, Env *env) {
                     case VAL_NULL:   return val_bool(1);
                     case VAL_LIST:   return val_bool(left.list == right.list);
                     case VAL_MAP:    return val_bool(left.map  == right.map);
+                    case VAL_STRUCT: return val_bool(left.strukt == right.strukt);
                 }
             }
             if (strcmp(op, "!=") == 0) {
@@ -145,6 +235,7 @@ static Value eval_expr(Interpreter *interp, Expr *e, Env *env) {
                     case VAL_NULL:   return val_bool(0);
                     case VAL_LIST:   return val_bool(left.list != right.list);
                     case VAL_MAP:    return val_bool(left.map  != right.map);
+                    case VAL_STRUCT: return val_bool(left.strukt != right.strukt);
                 }
             }
 
@@ -188,38 +279,55 @@ static Value eval_expr(Interpreter *interp, Expr *e, Env *env) {
         }
 
         case EXPR_CALL: {
-            /* check if it's a user-defined function in the environment */
-            Value fn_val;
-            if (env_get(env, e->call.name, &fn_val)) {
-                /* user-defined functions stored as VAL_NULL with a side-channel
-                   are handled via the fn_def lookup below — see exec_stmt */
+            /* struct construction: the callee names a registered struct type */
+            StructType *st = find_struct(interp, e->call.name);
+            if (st) {
+                int n = st->def->struct_def.fields.len;
+                if (n > 64) { runtime_error(interp, e->line, "Struct has too many fields"); return val_null(); }
+                const char *names[64];
+                for (int i = 0; i < n; i++) names[i] = st->def->struct_def.fields.data[i].name;
+                Value vals[64];
+                if (!bind_args(interp, e->call.args, env, names, n, vals, e->line))
+                    return val_null();
+                Value inst = val_struct(e->call.name);
+                for (int i = 0; i < n; i++) struct_set(inst.strukt, names[i], vals[i]);
+                return inst;
             }
 
-            /* evaluate arguments */
-            Value args[64];
-            int   argc = e->call.args.len;
-            for (int i = 0; i < argc; i++)
-                args[i] = eval_expr(interp, e->call.args.data[i], env);
-
-            /* look up user-defined function in globals */
+            /* user-defined function: fn.string holds a pointer to the Stmt */
             Value fn;
             if (env_get(interp->globals, e->call.name, &fn)) {
-                /* user function: fn.string holds a pointer to the Stmt (ugly but works) */
                 Stmt *fn_stmt;
                 memcpy(&fn_stmt, fn.string, sizeof(Stmt *));
 
+                int n = fn_stmt->fn_def.params.len;
+                if (n > 64) { runtime_error(interp, e->line, "Function has too many parameters"); return val_null(); }
+                const char *names[64];
+                for (int i = 0; i < n; i++) names[i] = fn_stmt->fn_def.params.data[i].name;
+                Value vals[64];
+                if (!bind_args(interp, e->call.args, env, names, n, vals, e->line))
+                    return val_null();
+
                 Env *fn_env = env_new(interp->globals);
-                for (int i = 0; i < fn_stmt->fn_def.params.len && i < argc; i++)
-                    env_define(fn_env, fn_stmt->fn_def.params.data[i].name, args[i]);
-
+                for (int i = 0; i < n; i++) env_define(fn_env, names[i], vals[i]);
                 exec_stmt(interp, fn_stmt->fn_def.body, fn_env);
-                env_free(fn_env);
-
                 Value ret = g_returning ? g_return_val : val_null();
                 g_returning = 0;
+                env_free(fn_env);
                 return ret;
             }
 
+            /* built-in function: positional arguments only */
+            int argc = e->call.args.len;
+            if (argc > 64) { runtime_error(interp, e->line, "Too many arguments"); return val_null(); }
+            Value args[64];
+            for (int i = 0; i < argc; i++) {
+                if (e->call.args.data[i].name != NULL) {
+                    runtime_error(interp, e->line, "Built-in functions do not take named arguments");
+                    return val_null();
+                }
+                args[i] = eval_expr(interp, e->call.args.data[i].value, env);
+            }
             return call_builtin(interp, e->call.name, args, argc, e->line);
         }
 
@@ -259,6 +367,56 @@ static Value eval_expr(Interpreter *interp, Expr *e, Env *env) {
             }
             runtime_error(interp, e->line, "Cannot index into this type");
             return val_null();
+        }
+
+        case EXPR_FIELD: {
+            Value obj = eval_expr(interp, e->field.object, env);
+            if (obj.type != VAL_STRUCT) {
+                runtime_error(interp, e->line, "Field access on a non-struct value");
+                return val_null();
+            }
+            Value out;
+            if (!struct_get(obj.strukt, e->field.name, &out)) {
+                runtime_error(interp, e->line, "No such field");
+                fprintf(stderr, "  '%s' on '%s'\n", e->field.name, obj.strukt->type_name);
+                return val_null();
+            }
+            return out;
+        }
+
+        case EXPR_METHOD: {
+            Value obj = eval_expr(interp, e->method.object, env);
+            if (obj.type != VAL_STRUCT) {
+                runtime_error(interp, e->line, "Method call on a non-struct value");
+                return val_null();
+            }
+            StructType *st = find_struct(interp, obj.strukt->type_name);
+            Stmt *m = st ? struct_find_method(st, e->method.name) : NULL;
+            if (!m) {
+                runtime_error(interp, e->line, "Undefined method");
+                fprintf(stderr, "  '%s' on '%s'\n", e->method.name, obj.strukt->type_name);
+                return val_null();
+            }
+
+            /* params[0] is the receiver (self); the rest are bound from args */
+            int np       = m->fn_def.params.len;
+            int has_self = np > 0;
+            int nslots   = has_self ? np - 1 : 0;
+            if (nslots > 64) { runtime_error(interp, e->line, "Method has too many parameters"); return val_null(); }
+            const char *names[64];
+            for (int i = 0; i < nslots; i++) names[i] = m->fn_def.params.data[i + 1].name;
+            Value vals[64];
+            if (!bind_args(interp, e->method.args, env, names, nslots, vals, e->line))
+                return val_null();
+
+            Env *fn_env = env_new(interp->globals);
+            if (has_self) env_define(fn_env, m->fn_def.params.data[0].name, obj);
+            for (int i = 0; i < nslots; i++) env_define(fn_env, names[i], vals[i]);
+            exec_stmt(interp, m->fn_def.body, fn_env);
+            Value ret = g_returning ? g_return_val : val_null();
+            g_returning = 0;
+            env_free(fn_env);
+            return ret;
         }
     }
     return val_null();
@@ -338,13 +496,106 @@ static void exec_stmt(Interpreter *interp, Stmt *s, Env *env) {
             env_define(interp->globals, s->fn_def.name, fn);
             break;
         }
+
+        case STMT_FIELD_ASSIGN: {
+            Value obj = eval_expr(interp, s->field_assign.object, env);
+            if (obj.type != VAL_STRUCT) {
+                runtime_error(interp, s->line, "Field assignment on a non-struct value");
+                break;
+            }
+            if (!struct_has(obj.strukt, s->field_assign.name)) {
+                runtime_error(interp, s->line, "No such field");
+                fprintf(stderr, "  '%s' on '%s'\n", s->field_assign.name, obj.strukt->type_name);
+                break;
+            }
+            Value v = eval_expr(interp, s->field_assign.value, env);
+            struct_set(obj.strukt, s->field_assign.name, v);
+            break;
+        }
+
+        /* Declarations are resolved at load time (see interpreter_prepare);
+           there is nothing to execute when they appear in the statement stream. */
+        case STMT_STRUCT_DEF:
+        case STMT_INTERFACE_DEF:
+        case STMT_IMPL:
+        case STMT_IMPLEMENT:
+            break;
+    }
+}
+
+/* ── Load-time pass: register types, attach methods, check conformance ─ */
+static void interpreter_prepare(Interpreter *interp, Program *prog) {
+    /* Pass 1: register every struct and interface definition, so impl/implement
+       blocks and constructions may refer to types declared later in the file. */
+    for (int i = 0; i < prog->stmts.len; i++) {
+        Stmt *s = prog->stmts.data[i];
+        if (s->kind == STMT_STRUCT_DEF) {
+            if (find_struct(interp, s->struct_def.name)) { load_error(interp, s->line, "Duplicate struct definition"); return; }
+            if (interp->struct_count >= MAX_STRUCT_TYPES) { load_error(interp, s->line, "Too many struct types"); return; }
+            StructType *st = &interp->structs[interp->struct_count++];
+            memset(st, 0, sizeof(*st));
+            st->def = s;
+        } else if (s->kind == STMT_INTERFACE_DEF) {
+            if (find_interface(interp, s->interface_def.name)) { load_error(interp, s->line, "Duplicate interface definition"); return; }
+            if (interp->interface_count >= MAX_INTERFACES) { load_error(interp, s->line, "Too many interfaces"); return; }
+            interp->interfaces[interp->interface_count++] = s;
+        }
+    }
+
+    /* Pass 2: attach impl and implement methods to their struct's method table,
+       enforcing one impl block per struct, and verify interface conformance. */
+    for (int i = 0; i < prog->stmts.len; i++) {
+        Stmt *s = prog->stmts.data[i];
+
+        if (s->kind == STMT_IMPL) {
+            StructType *st = find_struct(interp, s->impl.struct_name);
+            if (!st)            { load_error(interp, s->line, "impl block for an undefined struct"); return; }
+            if (st->has_impl)   { load_error(interp, s->line, "Duplicate impl block (a struct's methods must live in one impl block)"); return; }
+            st->has_impl = 1;
+            for (int m = 0; m < s->impl.methods.len; m++) {
+                type_add_method(interp, st, s->impl.methods.data[m], s->line);
+                if (interp->had_error) return;
+            }
+        } else if (s->kind == STMT_IMPLEMENT) {
+            Stmt       *iface = find_interface(interp, s->implement.interface_name);
+            StructType *st    = find_struct(interp, s->implement.struct_name);
+            if (!iface) { load_error(interp, s->line, "implement of an undefined interface"); return; }
+            if (!st)    { load_error(interp, s->line, "implement for an undefined struct"); return; }
+            for (int k = 0; k < st->interface_count; k++)
+                if (strcmp(st->interfaces[k], s->implement.interface_name) == 0) {
+                    load_error(interp, s->line, "Struct already implements this interface"); return;
+                }
+            if (st->interface_count >= MAX_IMPL_IFACES) { load_error(interp, s->line, "Struct implements too many interfaces"); return; }
+            st->interfaces[st->interface_count++] = s->implement.interface_name;
+
+            for (int m = 0; m < s->implement.methods.len; m++) {
+                type_add_method(interp, st, s->implement.methods.data[m], s->line);
+                if (interp->had_error) return;
+            }
+
+            /* conformance: every signature in the interface must be defined here */
+            for (int sg = 0; sg < iface->interface_def.sigs.len; sg++) {
+                const char *req = iface->interface_def.sigs.data[sg]->fn_def.name;
+                int found = 0;
+                for (int m = 0; m < s->implement.methods.len; m++)
+                    if (strcmp(s->implement.methods.data[m]->fn_def.name, req) == 0) { found = 1; break; }
+                if (!found) {
+                    fprintf(stderr, "[line %d] Load error: struct '%s' does not implement method '%s' required by interface '%s'\n",
+                            s->line, s->implement.struct_name, req, s->implement.interface_name);
+                    interp->had_error = 1;
+                    return;
+                }
+            }
+        }
     }
 }
 
 /* ── Entry points ─────────────────────────────────────────────────── */
 void interpreter_init(Interpreter *interp) {
-    interp->globals   = env_new(NULL);
-    interp->had_error = 0;
+    interp->globals         = env_new(NULL);
+    interp->had_error       = 0;
+    interp->struct_count    = 0;
+    interp->interface_count = 0;
 }
 
 void interpreter_free(Interpreter *interp) {
@@ -352,8 +603,18 @@ void interpreter_free(Interpreter *interp) {
 }
 
 void interpreter_run(Interpreter *interp, Program *prog) {
+    /* Resolve all type declarations and validate interface conformance before
+       running anything; a load error stops execution entirely. */
+    interpreter_prepare(interp, prog);
+    if (interp->had_error) return;
+
     for (int i = 0; i < prog->stmts.len; i++) {
-        exec_stmt(interp, prog->stmts.data[i], interp->globals);
+        Stmt *s = prog->stmts.data[i];
+        /* type declarations were already handled in the load-time pass */
+        if (s->kind == STMT_STRUCT_DEF || s->kind == STMT_INTERFACE_DEF ||
+            s->kind == STMT_IMPL       || s->kind == STMT_IMPLEMENT)
+            continue;
+        exec_stmt(interp, s, interp->globals);
         if (interp->had_error) break;
     }
 }

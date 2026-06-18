@@ -97,12 +97,25 @@ static TokenType ident_type(const char *start, int len) {
         }
         case 'i': {
             if (len > 1 && start[1] == 'f')  return check_keyword(start, len, "if",  TOK_IF);
-            if (len > 1 && start[1] == 'n')  return check_keyword(start, len, "int", TOK_INT_TYPE);
+            if (len > 1 && start[1] == 'm') {  /* impl, implement */
+                TokenType t = check_keyword(start, len, "impl", TOK_IMPL);
+                if (t != TOK_IDENT) return t;
+                return check_keyword(start, len, "implement", TOK_IMPLEMENT);
+            }
+            if (len > 1 && start[1] == 'n') {  /* int, interface */
+                TokenType t = check_keyword(start, len, "int", TOK_INT_TYPE);
+                if (t != TOK_IDENT) return t;
+                return check_keyword(start, len, "interface", TOK_INTERFACE);
+            }
             break;
         }
         case 'l': return check_keyword(start, len, "list",   TOK_LIST_TYPE);
         case 'm': return check_keyword(start, len, "map",    TOK_MAP_TYPE);
-        case 's': return check_keyword(start, len, "string", TOK_STRING_TYPE);
+        case 's': {  /* string, struct */
+            TokenType t = check_keyword(start, len, "string", TOK_STRING_TYPE);
+            if (t != TOK_IDENT) return t;
+            return check_keyword(start, len, "struct", TOK_STRUCT);
+        }
         case 'n': return check_keyword(start, len, "null",   TOK_NULL);
         case 'r': return check_keyword(start, len, "return", TOK_RETURN);
         case 't': return check_keyword(start, len, "true",   TOK_TRUE);
@@ -137,6 +150,7 @@ Token lexer_next(Lexer *l) {
         case ']':  return make_token(l, TOK_RBRACKET, start);
         case ',':  return make_token(l, TOK_COMMA,    start);
         case ':':  return make_token(l, TOK_COLON,    start);
+        case '.':  return make_token(l, TOK_DOT,      start);
         case '+':  return make_token(l, TOK_PLUS,    start);
         case '-':  return make_token(l, TOK_MINUS,   start);
         case '*':  return make_token(l, TOK_STAR,    start);
@@ -175,6 +189,10 @@ const char *token_type_name(TokenType t) {
         case TOK_IF:      return "IF";
         case TOK_ELSE:    return "ELSE";
         case TOK_WHILE:   return "WHILE";
+        case TOK_STRUCT:    return "STRUCT";
+        case TOK_INTERFACE: return "INTERFACE";
+        case TOK_IMPL:      return "IMPL";
+        case TOK_IMPLEMENT: return "IMPLEMENT";
         case TOK_AND:     return "AND";
         case TOK_OR:      return "OR";
         case TOK_NOT:     return "NOT";
@@ -198,6 +216,7 @@ const char *token_type_name(TokenType t) {
         case TOK_RBRACKET:  return "RBRACKET";
         case TOK_COMMA:     return "COMMA";
         case TOK_COLON:     return "COLON";
+        case TOK_DOT:       return "DOT";
         case TOK_NEWLINE: return "NEWLINE";
         case TOK_EOF:     return "EOF";
         case TOK_ERROR:   return "ERROR";

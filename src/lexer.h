@@ -12,6 +12,8 @@ typedef enum {
     TOK_FN, TOK_RETURN,
     TOK_IF, TOK_ELSE,
     TOK_WHILE,
+    TOK_STRUCT, TOK_INTERFACE,
+    TOK_IMPL, TOK_IMPLEMENT,
 
     /* Operators */
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT,
@@ -30,6 +32,7 @@ typedef enum {
     TOK_LBRACKET, TOK_RBRACKET,  /* [ ] */
     TOK_COMMA,
     TOK_COLON,                   /* : */
+    TOK_DOT,                     /* . */
 
     /* Control */
     TOK_NEWLINE,

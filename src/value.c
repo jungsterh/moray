@@ -93,29 +93,38 @@ int map_has(MorayMap *m, const char *key) {
     return 0;
 }
 
+/* ── Struct ───────────────────────────────────────────────────────── */
+/*
+ * A struct instance is a named bag of fields. We reuse the map machinery for
+ * the fields, so struct_set/get/has are thin wrappers. Shared by reference.
+ */
+
+Value val_struct(const char *type_name) {
+    MorayStruct *s = calloc(1, sizeof(MorayStruct));
+    s->type_name   = strdup(type_name);
+    s->fields      = calloc(1, sizeof(MorayMap));
+    return (Value){ VAL_STRUCT, .strukt = s };
+}
+
+void struct_set(MorayStruct *s, const char *field, Value v) { map_set(s->fields, field, v); }
+int  struct_get(MorayStruct *s, const char *field, Value *out) { return map_get(s->fields, field, out); }
+int  struct_has(MorayStruct *s, const char *field) { return map_has(s->fields, field); }
+
 /* ── Shared free / print ──────────────────────────────────────────── */
 
 void value_free(Value v) {
-    switch (v.type) {
-        case VAL_STRING:
-            free(v.string);
-            break;
-        case VAL_LIST:
-            for (int i = 0; i < v.list->len; i++)
-                value_free(v.list->data[i]);
-            free(v.list->data);
-            free(v.list);
-            break;
-        case VAL_MAP:
-            for (int i = 0; i < v.map->len; i++) {
-                free(v.map->pairs[i].key);
-                value_free(v.map->pairs[i].value);
-            }
-            free(v.map->pairs);
-            free(v.map);
-            break;
-        default: break;
-    }
+    /*
+     * Deliberately a no-op. Every heap-backed value (string, list, map, struct)
+     * is shared by handle: bindings shallow-copy the Value, so the same heap
+     * object is reachable from multiple variables, function/method arguments,
+     * and `self` at once. With no ownership tracking or garbage collector,
+     * freeing here when a scope ends would dangle the other holders and
+     * double-free at program exit. So the interpreter reclaims nothing during
+     * execution and lets the OS free everything on exit — sound and simple for
+     * a tree-walker. (Kept as a function so call sites and the contract stay
+     * explicit if a real memory strategy is added later.)
+     */
+    (void)v;
 }
 
 void value_print(Value v) {
@@ -142,6 +151,15 @@ void value_print(Value v) {
             }
             printf("}");
             break;
+        case VAL_STRUCT:
+            printf("%s(", v.strukt->type_name);
+            for (int i = 0; i < v.strukt->fields->len; i++) {
+                if (i > 0) printf(", ");
+                printf("%s: ", v.strukt->fields->pairs[i].key);
+                value_print(v.strukt->fields->pairs[i].value);
+            }
+            printf(")");
+            break;
     }
 }
 
@@ -154,6 +172,7 @@ const char *value_type_name(ValueType t) {
         case VAL_NULL:   return "null";
         case VAL_LIST:   return "list";
         case VAL_MAP:    return "map";
+        case VAL_STRUCT: return "struct";   /* type() reports the instance's type name instead */
     }
     return "?";
 }

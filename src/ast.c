@@ -24,9 +24,40 @@ void expr_free(Expr *e) {
         case EXPR_UNARY:  expr_free(e->unary.right); break;
         case EXPR_CALL:
             free(e->call.name);
-            for (int i = 0; i < e->call.args.len; i++)
-                expr_free(e->call.args.data[i]);
+            for (int i = 0; i < e->call.args.len; i++) {
+                free(e->call.args.data[i].name);
+                expr_free(e->call.args.data[i].value);
+            }
             vector_free(&e->call.args);
+            break;
+        case EXPR_INDEX:
+            expr_free(e->index.object);
+            expr_free(e->index.index);
+            break;
+        case EXPR_FIELD:
+            expr_free(e->field.object);
+            free(e->field.name);
+            break;
+        case EXPR_METHOD:
+            expr_free(e->method.object);
+            free(e->method.name);
+            for (int i = 0; i < e->method.args.len; i++) {
+                free(e->method.args.data[i].name);
+                expr_free(e->method.args.data[i].value);
+            }
+            vector_free(&e->method.args);
+            break;
+        case EXPR_LIST:
+            for (int i = 0; i < e->list.len; i++)
+                expr_free(e->list.data[i]);
+            vector_free(&e->list);
+            break;
+        case EXPR_MAP:
+            for (int i = 0; i < e->map.len; i++) {
+                expr_free(e->map.data[i].key);
+                expr_free(e->map.data[i].value);
+            }
+            vector_free(&e->map);
             break;
         default: break;
     }
@@ -66,6 +97,36 @@ void stmt_free(Stmt *s) {
             for (int i = 0; i < s->block.len; i++)
                 stmt_free(s->block.data[i]);
             vector_free(&s->block);
+            break;
+        case STMT_STRUCT_DEF:
+            free(s->struct_def.name);
+            for (int i = 0; i < s->struct_def.fields.len; i++)
+                free(s->struct_def.fields.data[i].name);
+            vector_free(&s->struct_def.fields);
+            break;
+        case STMT_FIELD_ASSIGN:
+            expr_free(s->field_assign.object);
+            free(s->field_assign.name);
+            expr_free(s->field_assign.value);
+            break;
+        case STMT_IMPL:
+            free(s->impl.struct_name);
+            for (int i = 0; i < s->impl.methods.len; i++)
+                stmt_free(s->impl.methods.data[i]);
+            vector_free(&s->impl.methods);
+            break;
+        case STMT_INTERFACE_DEF:
+            free(s->interface_def.name);
+            for (int i = 0; i < s->interface_def.sigs.len; i++)
+                stmt_free(s->interface_def.sigs.data[i]);
+            vector_free(&s->interface_def.sigs);
+            break;
+        case STMT_IMPLEMENT:
+            free(s->implement.interface_name);
+            free(s->implement.struct_name);
+            for (int i = 0; i < s->implement.methods.len; i++)
+                stmt_free(s->implement.methods.data[i]);
+            vector_free(&s->implement.methods);
             break;
     }
     free(s);

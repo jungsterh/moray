@@ -22,3 +22,32 @@ while i < 5 {
     print(i)
     i = i + 1
 }
+
+# Lists: ordered, indexed from 0, grown with push/pop
+list nums = [1, 2, 3]
+push(nums, 4)
+print(nums[0])        # 1
+print(len(nums))      # 4
+print(pop(nums))      # 4  (removes and returns the last element)
+print(len(nums))      # 3
+
+# Lists can hold mixed values
+list mixed = ["moray", 42, true]
+print(mixed[1])       # 42
+
+# Sum a list with a while loop
+int total = 0
+int n = 0
+while n < len(nums) {
+    total = total + nums[n]
+    n = n + 1
+}
+print(total)          # 6
+
+# Maps: string keys to any value
+map person = {"name": "Ada", "age": 36}
+print(person["name"]) # Ada
+print(person["age"])  # 36
+print(has(person, "name"))   # true
+print(has(person, "email"))  # false
+print(len(person))    # 2
