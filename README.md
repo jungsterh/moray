@@ -315,7 +315,6 @@ Moray is intentionally minimal. Things it does **not** have (yet):
 
 - No `for` loops, `break`, or `continue`.
 - No `else if` keyword (nest inside `else`).
-- No arrays, maps, or other collection types.
 - No string escape sequences (`\n`, `\t`, `\"`, …).
 - No user-defined types/structs.
 - No closures — functions only capture the global scope.
