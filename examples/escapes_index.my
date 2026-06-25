@@ -1,0 +1,25 @@
+# String escape sequences
+print("line1\nline2\ttabbed")
+print('it\'s a "quote" test: \\ backslash')
+print("unknown escape stays: \q")
+
+# Index assignment on lists
+xs = [1, 2, 3]
+xs[0] = 10
+xs[2] += 5
+print(xs)          # [10, 2, 8]
+
+# Index assignment on maps
+m = {"a": 1, "b": 2}
+m["a"] = 100
+m["c"] = 3         # new key
+m["b"] *= 4
+print(m["a"])      # 100
+print(m["b"])      # 8
+print(m["c"])      # 3
+print(len(m))      # 3
+
+# nested
+grid = [[1, 2], [3, 4]]
+grid[0][1] = 99
+print(grid)        # [[1, 99], [3, 4]]

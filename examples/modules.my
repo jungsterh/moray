@@ -1,0 +1,25 @@
+# --- Modules ---
+
+import "examples/mathmod.my" as math
+
+print(math.add(2, 3))        # 5
+print(math.square(5))        # 25
+print(math.pi)               # 3.14159
+print(math.circle_area(2))   # 12.56636
+
+# A struct constructor reached through the module namespace.
+p = math.Point(3, 4)
+print(math.manhattan(p))     # 7
+
+# An exported closure (module-level value that is a function).
+print(math.inc(41))          # 42
+adder5 = math.make_adder(5)
+print(adder5(10))            # 15
+
+# type() reports the new value kinds.
+print(type(math))            # module
+print(type(math.add))        # function
+
+# Importing the same module again reuses the cached namespace.
+import "examples/mathmod.my" as math2
+print(math2.add(10, 10))     # 20

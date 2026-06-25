@@ -54,14 +54,24 @@ static void skip_whitespace(Lexer *l) {
     }
 }
 
-static Token read_string(Lexer *l) {
+/* Read a string literal delimited by `quote` (either '"' or '\''). The opening
+   quote has already been consumed; `start` points at it so the token text
+   includes both quotes. A backslash escapes the next character (so `\"`, `\'`,
+   `\\` do not terminate the string); the escape sequences themselves are
+   decoded later, by the parser. */
+static Token read_string(Lexer *l, char quote) {
     const char *start = l->current - 1; /* include opening quote */
-    while (!at_end(l) && peek(l) != '"') {
+    while (!at_end(l) && peek(l) != quote) {
         if (peek(l) == '\n') l->line++;
+        if (peek(l) == '\\') {
+            advance(l);                       /* consume backslash */
+            if (at_end(l)) break;             /* dangling: let the EOF check below report it */
+            if (peek(l) == '\n') l->line++;
+        }
         advance(l);
     }
     if (at_end(l)) return error_token(l, "Unterminated string");
-    advance(l); /* closing " */
+    advance(l); /* closing quote */
     return make_token(l, TOK_STRING, start);
 }
 
@@ -85,25 +95,41 @@ static TokenType check_keyword(const char *start, int len,
 
 static TokenType ident_type(const char *start, int len) {
     switch (start[0]) {
+        case 'a': {
+            if (len > 1 && start[1] == 'n') return check_keyword(start, len, "any", TOK_ANY_TYPE);
+            return check_keyword(start, len, "as", TOK_AS);
+        }
         case 'e': return check_keyword(start, len, "else",   TOK_ELSE);
-        case 'b': return check_keyword(start, len, "bool",   TOK_BOOL_TYPE);
+        case 'b': {
+            if (len > 1) {
+                if (start[1] == 'o')     return check_keyword(start, len, "bool",  TOK_BOOL_TYPE);
+                if (start[1] == 'r')     return check_keyword(start, len, "break", TOK_BREAK);
+            }
+            break;
+        }
+        case 'c': return check_keyword(start, len, "continue", TOK_CONTINUE);
         case 'f': {
             if (len > 1) {
                 if (start[1] == 'n')     return check_keyword(start, len, "fn",    TOK_FN);
                 if (start[1] == 'a')     return check_keyword(start, len, "false", TOK_FALSE);
                 if (start[1] == 'l')     return check_keyword(start, len, "float", TOK_FLOAT_TYPE);
+                if (start[1] == 'o')     return check_keyword(start, len, "for",   TOK_FOR);
             }
             break;
         }
         case 'i': {
             if (len > 1 && start[1] == 'f')  return check_keyword(start, len, "if",  TOK_IF);
-            if (len > 1 && start[1] == 'm') {  /* impl, implement */
+            if (len > 1 && start[1] == 'm') {  /* impl, implement, import */
                 TokenType t = check_keyword(start, len, "impl", TOK_IMPL);
                 if (t != TOK_IDENT) return t;
-                return check_keyword(start, len, "implement", TOK_IMPLEMENT);
+                t = check_keyword(start, len, "implement", TOK_IMPLEMENT);
+                if (t != TOK_IDENT) return t;
+                return check_keyword(start, len, "import", TOK_IMPORT);
             }
-            if (len > 1 && start[1] == 'n') {  /* int, interface */
-                TokenType t = check_keyword(start, len, "int", TOK_INT_TYPE);
+            if (len > 1 && start[1] == 'n') {  /* in, int, interface */
+                TokenType t = check_keyword(start, len, "in", TOK_IN);
+                if (t != TOK_IDENT) return t;
+                t = check_keyword(start, len, "int", TOK_INT_TYPE);
                 if (t != TOK_IDENT) return t;
                 return check_keyword(start, len, "interface", TOK_INTERFACE);
             }
@@ -150,12 +176,15 @@ Token lexer_next(Lexer *l) {
         case ']':  return make_token(l, TOK_RBRACKET, start);
         case ',':  return make_token(l, TOK_COMMA,    start);
         case ':':  return make_token(l, TOK_COLON,    start);
+        case ';':  return make_token(l, TOK_SEMICOLON, start);
         case '.':  return make_token(l, TOK_DOT,      start);
-        case '+':  return make_token(l, TOK_PLUS,    start);
-        case '-':  return make_token(l, TOK_MINUS,   start);
-        case '*':  return make_token(l, TOK_STAR,    start);
-        case '/':  return make_token(l, TOK_SLASH,   start);
-        case '%':  return make_token(l, TOK_PERCENT, start);
+        case '+':  if (match(l, '+')) return make_token(l, TOK_PLUSPLUS, start);
+                   return make_token(l, match(l, '=') ? TOK_PLUSEQ : TOK_PLUS, start);
+        case '-':  if (match(l, '-')) return make_token(l, TOK_MINUSMINUS, start);
+                   return make_token(l, match(l, '=') ? TOK_MINUSEQ : TOK_MINUS, start);
+        case '*':  return make_token(l, match(l, '=') ? TOK_STAREQ    : TOK_STAR,    start);
+        case '/':  return make_token(l, match(l, '=') ? TOK_SLASHEQ   : TOK_SLASH,   start);
+        case '%':  return make_token(l, match(l, '=') ? TOK_PERCENTEQ : TOK_PERCENT, start);
         case '&':  return match(l,'&') ? make_token(l, TOK_AND, start)
                                        : error_token(l, "Expected '&&' (use '&&' for logical and)");
         case '|':  return match(l,'|') ? make_token(l, TOK_OR, start)
@@ -164,7 +193,8 @@ Token lexer_next(Lexer *l) {
         case '!':  return make_token(l, match(l,'=') ? TOK_BANGEQ : TOK_NOT,    start);
         case '<':  return make_token(l, match(l,'=') ? TOK_LTEQ   : TOK_LT,     start);
         case '>':  return make_token(l, match(l,'=') ? TOK_GTEQ   : TOK_GT,     start);
-        case '"':  return read_string(l);
+        case '"':  return read_string(l, '"');
+        case '\'': return read_string(l, '\'');
     }
 
     return error_token(l, "Unexpected character");
@@ -184,15 +214,22 @@ const char *token_type_name(TokenType t) {
         case TOK_BOOL_TYPE:   return "BOOL_TYPE";
         case TOK_LIST_TYPE:   return "LIST_TYPE";
         case TOK_MAP_TYPE:    return "MAP_TYPE";
+        case TOK_ANY_TYPE:    return "ANY_TYPE";
         case TOK_FN:      return "FN";
         case TOK_RETURN:  return "RETURN";
         case TOK_IF:      return "IF";
         case TOK_ELSE:    return "ELSE";
         case TOK_WHILE:   return "WHILE";
+        case TOK_FOR:     return "FOR";
+        case TOK_IN:      return "IN";
+        case TOK_BREAK:   return "BREAK";
+        case TOK_CONTINUE: return "CONTINUE";
         case TOK_STRUCT:    return "STRUCT";
         case TOK_INTERFACE: return "INTERFACE";
         case TOK_IMPL:      return "IMPL";
         case TOK_IMPLEMENT: return "IMPLEMENT";
+        case TOK_IMPORT:    return "IMPORT";
+        case TOK_AS:        return "AS";
         case TOK_AND:     return "AND";
         case TOK_OR:      return "OR";
         case TOK_NOT:     return "NOT";
@@ -201,6 +238,13 @@ const char *token_type_name(TokenType t) {
         case TOK_STAR:    return "STAR";
         case TOK_SLASH:   return "SLASH";
         case TOK_PERCENT: return "PERCENT";
+        case TOK_PLUSPLUS:   return "PLUSPLUS";
+        case TOK_MINUSMINUS: return "MINUSMINUS";
+        case TOK_PLUSEQ:     return "PLUSEQ";
+        case TOK_MINUSEQ:    return "MINUSEQ";
+        case TOK_STAREQ:     return "STAREQ";
+        case TOK_SLASHEQ:    return "SLASHEQ";
+        case TOK_PERCENTEQ:  return "PERCENTEQ";
         case TOK_EQ:      return "EQ";
         case TOK_EQEQ:    return "EQEQ";
         case TOK_BANGEQ:  return "BANGEQ";
@@ -216,6 +260,7 @@ const char *token_type_name(TokenType t) {
         case TOK_RBRACKET:  return "RBRACKET";
         case TOK_COMMA:     return "COMMA";
         case TOK_COLON:     return "COLON";
+        case TOK_SEMICOLON: return "SEMICOLON";
         case TOK_DOT:       return "DOT";
         case TOK_NEWLINE: return "NEWLINE";
         case TOK_EOF:     return "EOF";

@@ -19,6 +19,8 @@ typedef enum {
     VAL_LIST,
     VAL_MAP,
     VAL_STRUCT,
+    VAL_FUNCTION,   /* a closure: AST body + captured defining environment */
+    VAL_MODULE,     /* a loaded module: a namespace environment            */
 } ValueType;
 
 /*
@@ -31,6 +33,10 @@ typedef struct Value       Value;
 typedef struct MorayList   MorayList;
 typedef struct MorayMap    MorayMap;
 typedef struct MorayStruct MorayStruct;
+typedef struct MorayFunc   MorayFunc;
+/* Defined elsewhere; a Value only ever holds pointers to these. */
+typedef struct Stmt        Stmt;   /* AST function definition (ast.h)  */
+typedef struct Env         Env;    /* lexical scope (env.h)            */
 
 /*
  * Garbage-collection header.
@@ -42,7 +48,7 @@ typedef struct MorayStruct MorayStruct;
  * strings, which have no struct, the header is allocated as a prefix in front of
  * the character data (see gc_new_string_buffer in value.c).
  */
-typedef enum { GC_STRING, GC_LIST, GC_MAP, GC_STRUCT } GCKind;
+typedef enum { GC_STRING, GC_LIST, GC_MAP, GC_STRUCT, GC_FUNC, GC_ENV } GCKind;
 
 typedef struct GCHeader {
     struct GCHeader *next;   /* next object in the global all-objects list */
@@ -60,7 +66,21 @@ struct Value {
         MorayList    *list;      /* heap-allocated, shared */
         MorayMap     *map;       /* heap-allocated, shared */
         MorayStruct  *strukt;    /* heap-allocated, shared ('struct' is a keyword) */
+        MorayFunc    *func;      /* VAL_FUNCTION: closure object               */
+        Env          *menv;      /* VAL_MODULE: the module's namespace scope   */
     };
+};
+
+/*
+ * A first-class function value (closure). `def` points at the STMT_FN_DEF in the
+ * AST (not GC-owned); `closure` is the environment in force where the function
+ * was defined, captured so the body can see its lexical surroundings. The
+ * captured env is a GC object kept alive by this function's reachability.
+ */
+struct MorayFunc {
+    GCHeader  gc;          /* must stay first — see GCHeader */
+    Stmt     *def;         /* STMT_FN_DEF (owned by the AST, not the GC) */
+    Env      *closure;     /* captured defining scope                    */
 };
 
 /* Heap-allocated list shared by reference */
@@ -71,9 +91,11 @@ struct MorayList {
     int    cap;
 };
 
-/* Heap-allocated map entry */
+/* Heap-allocated map entry. The key is a scalar Value (int/float/string/bool);
+   string keys are GC-managed buffers, so the collector traces them like any
+   other string. */
 typedef struct {
-    char  *key;    /* heap-allocated string */
+    Value  key;
     Value  value;
 } MapPair;
 
@@ -104,16 +126,19 @@ Value val_string(const char *ptr, int len);
 Value val_list_empty(void);
 Value val_map_empty(void);
 Value val_struct(const char *type_name);   /* empty instance, fields added via struct_set */
+Value val_function(Stmt *def, Env *closure);   /* a closure capturing its defining scope */
 
 /* List operations */
 void  list_push(MorayList *l, Value v);
 Value list_get(MorayList *l, int index);   /* returns null if out of bounds */
 void  list_set(MorayList *l, int index, Value v);
 
-/* Map operations */
-void  map_set(MorayMap *m, const char *key, Value v);
-int   map_get(MorayMap *m, const char *key, Value *out);  /* 1 if found */
-int   map_has(MorayMap *m, const char *key);
+/* Map operations. Any Value may be a key: scalars compare by value, reference
+   types (list/map/struct) by identity — exactly like `==`. (Struct fields use
+   the const-char* wrappers via struct_*.) */
+void  map_set(MorayMap *m, Value key, Value v);
+int   map_get(MorayMap *m, Value key, Value *out);  /* 1 if found */
+int   map_has(MorayMap *m, Value key);
 
 /* Struct operations (thin wrappers over the field map) */
 void  struct_set(MorayStruct *s, const char *field, Value v);
@@ -145,6 +170,11 @@ char *gc_new_string_buffer(size_t nbytes);
 
 /* Mark one value and everything transitively reachable from it. */
 void  gc_mark_value(Value v);
+
+/* Thread a freshly-allocated environment onto the GC's object list so the
+   collector owns its lifetime (a closure may keep it alive past its scope).
+   Defined in value.c; called by env_new. */
+void  gc_register_env(Env *e);
 
 /* Protect stack: pin in-flight temporaries across a possible collection.
    gc_protect returns the value for convenient inline use; gc_pop removes the

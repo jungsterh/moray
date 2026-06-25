@@ -8,15 +8,24 @@ typedef enum {
     /* Identifiers & keywords */
     TOK_IDENT,
     TOK_INT_TYPE, TOK_FLOAT_TYPE, TOK_STRING_TYPE, TOK_BOOL_TYPE,
-    TOK_LIST_TYPE, TOK_MAP_TYPE,
+    TOK_LIST_TYPE, TOK_MAP_TYPE, TOK_ANY_TYPE,
     TOK_FN, TOK_RETURN,
     TOK_IF, TOK_ELSE,
-    TOK_WHILE,
+    TOK_WHILE, TOK_FOR, TOK_IN,
+    TOK_BREAK, TOK_CONTINUE,
     TOK_STRUCT, TOK_INTERFACE,
     TOK_IMPL, TOK_IMPLEMENT,
+    TOK_IMPORT, TOK_AS,
 
     /* Operators */
     TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT,
+    TOK_PLUSPLUS,   /* ++ */
+    TOK_MINUSMINUS, /* -- */
+    TOK_PLUSEQ,     /* += */
+    TOK_MINUSEQ,    /* -= */
+    TOK_STAREQ,     /* *= */
+    TOK_SLASHEQ,    /* /= */
+    TOK_PERCENTEQ,  /* %= */
     TOK_AND,       /* && */
     TOK_OR,        /* || */
     TOK_NOT,       /* !  */
@@ -32,6 +41,7 @@ typedef enum {
     TOK_LBRACKET, TOK_RBRACKET,  /* [ ] */
     TOK_COMMA,
     TOK_COLON,                   /* : */
+    TOK_SEMICOLON,               /* ; */
     TOK_DOT,                     /* . */
 
     /* Control */

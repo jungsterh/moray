@@ -5,15 +5,15 @@ interface Describable {
 }
 
 struct Point {
-    int x
-    int y
+    x: int
+    y: int
 }
 
 impl Point {
     fn dist(self) {
         return self.x + self.y
     }
-    fn shift(self, int dx, int dy) {
+    fn shift(self, dx: int, dy: int) {
         self.x = self.x + dx
         self.y = self.y + dy
     }
@@ -28,8 +28,8 @@ Point implement Describable {
 }
 
 # Construction: positional, and positional + named (named must come last)
-Point a = Point(3, 4)
-Point b = Point(10, y = 20)
+a: Point = Point(3, 4)
+b: Point = Point(10, y = 20)
 
 print(a.x)              # 3
 print(b.y)              # 20
@@ -49,7 +49,7 @@ print(b.y)             # 22
 a.describe()           # Point at / 9 / 4
 
 # Reference semantics: aliasing shares the instance
-Point c = a
+c: Point = a
 c.x = 100
 print(a.x)             # 100  (same instance)
 

@@ -13,6 +13,7 @@ typedef enum {
     EXPR_BINARY,    /* a + b         */
     EXPR_UNARY,     /* not x, -x     */
     EXPR_CALL,      /* add(1, 2)     */
+    EXPR_CALLV,     /* (expr)(1, 2)  — call an arbitrary callee expression */
     EXPR_LIST,      /* [1, 2, 3]     */
     EXPR_MAP,       /* {"a": 1}      */
     EXPR_INDEX,     /* x[0], m["k"]  */
@@ -26,15 +27,21 @@ typedef enum {
     STMT_ASSIGN,    /* x = 20        */
     STMT_IF,        /* if cond { }   */
     STMT_WHILE,     /* while cond {} */
+    STMT_FOR,       /* for i;c;u {}  */
+    STMT_FOR_IN,    /* for x in xs {}*/
+    STMT_BREAK,     /* break         */
+    STMT_CONTINUE,  /* continue      */
     STMT_RETURN,    /* return expr   */
     STMT_FN_DEF,    /* fn foo(a) {}  */
     STMT_EXPR,      /* bare expr     */
     STMT_BLOCK,     /* { stmts }     */
     STMT_STRUCT_DEF,    /* struct Point { int x }            */
     STMT_FIELD_ASSIGN,  /* p.x = 5                           */
+    STMT_INDEX_ASSIGN,  /* list[0] = x, m[k] = v             */
     STMT_IMPL,          /* impl Point { fn ... }             */
     STMT_INTERFACE_DEF, /* interface Drawable { fn draw() }  */
     STMT_IMPLEMENT,     /* implement Drawable for Point {}   */
+    STMT_IMPORT,        /* import "math.my" as math          */
 } StmtKind;
 
 /* ── Type annotation ──────────────────────────────────────────────── */
@@ -47,7 +54,20 @@ typedef enum {
     TYPE_LIST,
     TYPE_MAP,
     TYPE_STRUCT,    /* a user struct type, named by identifier (not enforced at runtime) */
+    TYPE_ANY,       /* matches any value — opts out of declaration-time checking */
 } MorayType;
+
+/*
+ * A (possibly parameterized) type annotation on a variable declaration:
+ * `int`, `list<int>`, `map<string, int>`, `map<string, list<int>>`, …
+ *
+ * The type arguments inside `<…>` live in p0/p1: a list parameterizes its
+ * element type in p0; a map parameterizes its key in p0 and value in p1. Both
+ * are NULL for an unparameterized type, in which case the declaration is
+ * documentation-only as before. When parameters are present the interpreter
+ * enforces them against the bound value at declaration time.
+ */
+typedef struct TypeAnn TypeAnn;
 
 /* forward declare so Expr and Stmt can reference each other */
 typedef struct Expr Expr;
@@ -73,6 +93,12 @@ typedef struct {
     char *name;
 } Param;
 
+struct TypeAnn {
+    MorayType base;
+    TypeAnn  *p0;   /* list element, or map key  (NULL when unparameterized) */
+    TypeAnn  *p1;   /* map value                 (NULL otherwise)            */
+};
+
 /* A call/method argument: positional (name == NULL) or named (name = "y"). */
 typedef struct {
     char *name;   /* NULL if positional */
@@ -94,7 +120,7 @@ struct Expr {
         double num;                     /* EXPR_NUM              */
 
         struct {                        /* EXPR_STR              */
-            const char *ptr;
+            char *ptr;                  /* owned, escape-decoded; freed by expr_free */
             int len;
         } str;
 
@@ -117,6 +143,11 @@ struct Expr {
             char *name;
             vector(Arg) args;           /* positional and/or named */
         } call;
+
+        struct {                        /* EXPR_CALLV            */
+            Expr *callee;               /* evaluates to a function value */
+            vector(Arg) args;
+        } callv;
 
         vector(ExprPtr) list;           /* EXPR_LIST             */
 
@@ -149,12 +180,14 @@ struct Stmt {
     union {
         struct {                        /* STMT_VAR_DECL         */
             MorayType type;
+            TypeAnn  *ann;              /* full annotation; NULL for struct-typed decls */
             char *name;
             Expr *init;
         } var_decl;
 
         struct {                        /* STMT_ASSIGN           */
             char *name;
+            char  op[3];                /* "" plain; "+","-","*","/","%" compound */
             Expr *value;
         } assign;
 
@@ -168,6 +201,19 @@ struct Stmt {
             Expr *condition;
             Stmt *body;
         } while_stmt;
+
+        struct {                        /* STMT_FOR              */
+            Stmt *init;                 /* NULL if omitted; decl or assignment */
+            Expr *condition;            /* NULL means always true              */
+            Stmt *update;               /* NULL if omitted; runs after each pass */
+            Stmt *body;
+        } for_stmt;
+
+        struct {                        /* STMT_FOR_IN           */
+            char *var;                  /* loop variable, bound to each element */
+            Expr *iterable;             /* must evaluate to a list              */
+            Stmt *body;
+        } for_in;
 
         struct {                        /* STMT_RETURN           */
             Expr *value;                /* NULL for bare return  */
@@ -191,8 +237,16 @@ struct Stmt {
         struct {                        /* STMT_FIELD_ASSIGN     */
             Expr *object;
             char *name;
+            char  op[3];                /* "" plain; "+","-","*","/","%" compound */
             Expr *value;
         } field_assign;
+
+        struct {                        /* STMT_INDEX_ASSIGN     */
+            Expr *object;               /* the list or map       */
+            Expr *index;                /* the position or key   */
+            char  op[3];                /* "" plain; "+","-","*","/","%" compound */
+            Expr *value;
+        } index_assign;
 
         struct {                        /* STMT_IMPL             */
             char *struct_name;
@@ -209,6 +263,11 @@ struct Stmt {
             char *struct_name;
             vector(StmtPtr) methods;    /* each a STMT_FN_DEF     */
         } implement;
+
+        struct {                        /* STMT_IMPORT           */
+            char *path;                 /* module file path      */
+            char *alias;                /* namespace bound in scope */
+        } import;
     };
 };
 
@@ -219,6 +278,8 @@ typedef struct {
 } Program;
 
 /* Helpers */
+TypeAnn *typeann_alloc(MorayType base);
+void     typeann_free(TypeAnn *t);
 Expr *expr_alloc(ExprKind kind, int line);
 Stmt *stmt_alloc(StmtKind kind, int line);
 void  expr_free(Expr *e);

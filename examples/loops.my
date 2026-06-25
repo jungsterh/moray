@@ -1,0 +1,90 @@
+# for / break / continue / else if
+
+# C-style for
+sum = 0
+for i = 0; i < 5; i = i + 1 {
+    sum = sum + i
+}
+print(sum)                 # 10  (0+1+2+3+4)
+
+# Python-style for with range(n)
+prod = 1
+for i in range(1, 6) {
+    prod = prod * i
+}
+print(prod)                # 120 (5!)
+
+# Python-style for over a list
+words = ["a", "b", "c"]
+for w in words {
+    print(w)               # a / b / c
+}
+
+# break
+firstBig = -1
+for i in range(100) {
+    if i * i > 50 {
+        firstBig = i
+        break
+    }
+}
+print(firstBig)            # 8
+
+# continue (sum only even numbers 0..9)
+evens = 0
+for i = 0; i < 10; i = i + 1 {
+    if i % 2 != 0 {
+        continue
+    }
+    evens = evens + i
+}
+print(evens)               # 20 (0+2+4+6+8)
+
+# nested loops with break in the inner one only
+pairs = 0
+for i in range(3) {
+    for j in range(3) {
+        if j == 2 {
+            break
+        }
+        pairs = pairs + 1
+    }
+}
+print(pairs)               # 6 (3 outer * 2 inner)
+
+# else if chain
+fn grade(n: int) {
+    if n >= 90 {
+        return "A"
+    } else if n >= 80 {
+        return "B"
+    } else if n >= 70 {
+        return "C"
+    } else {
+        return "F"
+    }
+}
+print(grade(95))           # A
+print(grade(83))           # B
+print(grade(71))           # C
+print(grade(40))           # F
+
+# break/continue work inside a function's own loop, scoped to it
+fn count_until(stop: int) {
+    c = 0
+    for i in range(1000) {
+        if i == stop {
+            break
+        }
+        c = c + 1
+    }
+    return c
+}
+print(count_until(7))      # 7
+
+# empty-clause C-style for (while-equivalent)
+n = 0
+for ; n < 3; {
+    n = n + 1
+}
+print(n)                   # 3

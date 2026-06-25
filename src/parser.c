@@ -55,23 +55,48 @@ static MorayType parse_type(Parser *p) {
     if (match(p, TOK_BOOL_TYPE))   return TYPE_BOOL;
     if (match(p, TOK_LIST_TYPE))   return TYPE_LIST;
     if (match(p, TOK_MAP_TYPE))    return TYPE_MAP;
-    error(p, "Expected type (int, float, string, bool, list, map)");
+    if (match(p, TOK_ANY_TYPE))    return TYPE_ANY;
+    if (match(p, TOK_IDENT))       return TYPE_STRUCT;  /* a struct type name */
+    error(p, "Expected a type (int, float, string, bool, list, map, any, or a struct name)");
     return TYPE_INT;
 }
 
-static int is_type_token(Parser *p) {
-    return check(p, TOK_INT_TYPE)    || check(p, TOK_FLOAT_TYPE) ||
-           check(p, TOK_STRING_TYPE) || check(p, TOK_BOOL_TYPE)  ||
-           check(p, TOK_LIST_TYPE)   || check(p, TOK_MAP_TYPE);
+/* A full type annotation: a base type plus optional `<…>` parameters.
+   Only `list<elem>` and `map<key, value>` are parameterized; parameters may
+   nest (e.g. `map<string, list<int>>`). The closing `>>` of a nested type is
+   simply two `>` tokens — Moray has no `>>` token — so no special casing. */
+static TypeAnn *parse_type_ann(Parser *p) {
+    TypeAnn *t = typeann_alloc(parse_type(p));
+    if (match(p, TOK_LT)) {
+        if (t->base == TYPE_LIST) {
+            t->p0 = parse_type_ann(p);
+            expect(p, TOK_GT, "Expected '>' after list element type");
+        } else if (t->base == TYPE_MAP) {
+            t->p0 = parse_type_ann(p);
+            expect(p, TOK_COMMA, "Expected ',' between map key and value types");
+            t->p1 = parse_type_ann(p);
+            expect(p, TOK_GT, "Expected '>' after map value type");
+        } else {
+            error(p, "Only 'list' and 'map' take type parameters");
+        }
+    }
+    return t;
 }
 
-/* A parameter is normally `type name`, but may be an untyped name (e.g. the
-   `self` receiver in a method, where the type is implied by the impl target). */
+/* A parameter is `name: type`, or just `name` for an untyped receiver like the
+   `self` of a method. The annotation (including generics like `list<int>`) is
+   parsed but only its base type is kept — parameters are not type-checked. */
 static Param parse_param(Parser *p) {
     Param param;
-    param.type = is_type_token(p) ? parse_type(p) : TYPE_VOID;
     expect(p, TOK_IDENT, "Expected parameter name");
     param.name = token_to_str(p->previous);
+    if (match(p, TOK_COLON)) {
+        TypeAnn *ann = parse_type_ann(p);
+        param.type = ann->base;
+        typeann_free(ann);
+    } else {
+        param.type = TYPE_VOID;   /* untyped, e.g. self */
+    }
     return param;
 }
 
@@ -94,6 +119,37 @@ static Param parse_param(Parser *p) {
 static Expr *parse_expr(Parser *p);
 static void  parse_args(Parser *p, vector(Arg) *out);  /* fills until and past ')' */
 
+/* Decode a string literal's body (quotes already stripped) into a freshly
+   allocated, NUL-terminated buffer, translating backslash escapes. Escapes
+   only ever shorten the text, so `len + 1` bytes always suffice. An unknown
+   escape (e.g. `\x`) is left verbatim, backslash included. *out_len receives
+   the decoded length (excluding the NUL). */
+static char *unescape_string(const char *src, int len, int *out_len) {
+    char *buf = malloc((len < 0 ? 0 : len) + 1);
+    int n = 0;
+    for (int i = 0; i < len; i++) {
+        char c = src[i];
+        if (c == '\\' && i + 1 < len) {
+            char e = src[++i];
+            switch (e) {
+                case 'n':  buf[n++] = '\n'; break;
+                case 't':  buf[n++] = '\t'; break;
+                case 'r':  buf[n++] = '\r'; break;
+                case '0':  buf[n++] = '\0'; break;
+                case '\\': buf[n++] = '\\'; break;
+                case '\'': buf[n++] = '\''; break;
+                case '"':  buf[n++] = '"';  break;
+                default:   buf[n++] = '\\'; buf[n++] = e; break;  /* keep unknown escape verbatim */
+            }
+        } else {
+            buf[n++] = c;
+        }
+    }
+    buf[n]   = '\0';
+    *out_len = n;
+    return buf;
+}
+
 static Expr *parse_primary(Parser *p) {
     int line = p->current.line;
 
@@ -104,9 +160,9 @@ static Expr *parse_primary(Parser *p) {
     }
     if (match(p, TOK_STRING)) {
         Expr *e = expr_alloc(EXPR_STR, line);
-        /* strip surrounding quotes */
-        e->str.ptr = p->previous.start + 1;
-        e->str.len = p->previous.length - 2;
+        /* strip surrounding quotes, then decode escape sequences */
+        e->str.ptr = unescape_string(p->previous.start + 1,
+                                     p->previous.length - 2, &e->str.len);
         return e;
     }
     if (match(p, TOK_TRUE)) {
@@ -228,6 +284,13 @@ static Expr *parse_postfix(Parser *p, Expr *object) {
             e->index.object = object;
             e->index.index  = parse_expr(p);
             expect(p, TOK_RBRACKET, "Expected ']' after index");
+            object = e;
+        } else if (match(p, TOK_LPAREN)) {        /* call a callee expression: f()() */
+            int line = p->previous.line;
+            Expr *e  = expr_alloc(EXPR_CALLV, line);
+            e->callv.callee = object;
+            e->callv.args   = (vector(Arg))vector_new();
+            parse_args(p, &e->callv.args);
             object = e;
         } else if (match(p, TOK_DOT)) {
             int line = p->previous.line;
@@ -431,11 +494,8 @@ static Stmt *parse_struct_def(Parser *p) {
     s->struct_def.name   = name;
     s->struct_def.fields = (vector(Param))vector_new();
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
-        Param field;
-        field.type = parse_type(p);
-        expect(p, TOK_IDENT, "Expected field name");
-        field.name = token_to_str(p->previous);
-        vector_push(&s->struct_def.fields, field);
+        /* fields are `name: type`, reusing the parameter parser */
+        vector_push(&s->struct_def.fields, parse_param(p));
     }
     expect(p, TOK_RBRACE, "Expected '}' to close struct");
     return s;
@@ -496,29 +556,72 @@ static Stmt *parse_implement(Parser *p, Token struct_name, int line) {
     return s;
 }
 
-static Stmt *parse_stmt(Parser *p) {
-    int line = p->current.line;
-
-    /* variable declaration: int x = expr */
-    if (check(p, TOK_INT_TYPE)    || check(p, TOK_FLOAT_TYPE) ||
-        check(p, TOK_STRING_TYPE) || check(p, TOK_BOOL_TYPE)  ||
-        check(p, TOK_LIST_TYPE)   || check(p, TOK_MAP_TYPE)) {
-        MorayType type = parse_type(p);
-        expect(p, TOK_IDENT, "Expected variable name after type");
-        char *name = token_to_str(p->previous);
-        expect(p, TOK_EQ, "Expected '=' after variable name");
-        Expr *init = parse_expr(p);
-        Stmt *s    = stmt_alloc(STMT_VAR_DECL, line);
-        s->var_decl.type = type;
-        s->var_decl.name = name;
-        s->var_decl.init = init;
+/* Build an assignment statement from an already-parsed target expression.
+   `op` is "" for a plain `=`, or an arithmetic operator ("+", "-", …) for a
+   compound assignment (`+=`, `++`, …). Only identifiers and fields are valid
+   targets; the target shell is freed once its parts are stolen. */
+static Stmt *make_assign(Parser *p, Expr *target, const char *op,
+                         Expr *value, int line) {
+    if (target && target->kind == EXPR_IDENT) {
+        Stmt *s = stmt_alloc(STMT_ASSIGN, line);
+        s->assign.name  = target->ident;   /* steal the heap string */
+        strcpy(s->assign.op, op);
+        s->assign.value = value;
+        free(target);                      /* free the shell, not its name */
         return s;
     }
+    if (target && target->kind == EXPR_FIELD) {
+        Stmt *s = stmt_alloc(STMT_FIELD_ASSIGN, line);
+        s->field_assign.object = target->field.object;  /* steal */
+        s->field_assign.name   = target->field.name;    /* steal */
+        strcpy(s->field_assign.op, op);
+        s->field_assign.value  = value;
+        free(target);
+        return s;
+    }
+    if (target && target->kind == EXPR_INDEX) {
+        Stmt *s = stmt_alloc(STMT_INDEX_ASSIGN, line);
+        s->index_assign.object = target->index.object;  /* steal */
+        s->index_assign.index  = target->index.index;   /* steal */
+        strcpy(s->index_assign.op, op);
+        s->index_assign.value  = value;
+        free(target);
+        return s;
+    }
+    error(p, "Invalid assignment target");
+    expr_free(target);
+    expr_free(value);
+    return NULL;
+}
+
+/* A literal `1`, used to desugar `x++`/`x--` into `x += 1` / `x -= 1`. */
+static Expr *expr_one(int line) {
+    Expr *e = expr_alloc(EXPR_NUM, line);
+    e->num  = 1;
+    return e;
+}
+
+static Stmt *parse_stmt(Parser *p) {
+    int line = p->current.line;
 
     if (match(p, TOK_FN))         return parse_fn_def(p);
     if (match(p, TOK_STRUCT))     return parse_struct_def(p);
     if (match(p, TOK_INTERFACE))  return parse_interface_def(p);
     if (match(p, TOK_IMPL))       return parse_impl(p);
+
+    if (match(p, TOK_IMPORT)) {
+        /* import "path.my" as name */
+        expect(p, TOK_STRING, "Expected a module path string after 'import'");
+        Token path = p->previous;
+        int plen;
+        char *path_str = unescape_string(path.start + 1, path.length - 2, &plen);
+        expect(p, TOK_AS, "Expected 'as' after the import path");
+        expect(p, TOK_IDENT, "Expected a module alias name after 'as'");
+        Stmt *s = stmt_alloc(STMT_IMPORT, line);
+        s->import.path  = path_str;
+        s->import.alias = token_to_str(p->previous);
+        return s;
+    }
 
     if (match(p, TOK_RETURN)) {
         Stmt *s    = stmt_alloc(STMT_RETURN, line);
@@ -532,8 +635,14 @@ static Stmt *parse_stmt(Parser *p) {
         Stmt *then_block = parse_block(p);
         Stmt *else_block = NULL;
         if (match(p, TOK_ELSE)) {
-            expect(p, TOK_LBRACE, "Expected '{' after else");
-            else_block = parse_block(p);
+            /* `else if` chains by letting the else branch be another if
+               statement; otherwise it is a brace-delimited block. */
+            if (check(p, TOK_IF)) {
+                else_block = parse_stmt(p);
+            } else {
+                expect(p, TOK_LBRACE, "Expected '{' after else");
+                else_block = parse_block(p);
+            }
         }
         Stmt *s = stmt_alloc(STMT_IF, line);
         s->if_stmt.condition  = cond;
@@ -551,31 +660,73 @@ static Stmt *parse_stmt(Parser *p) {
         return s;
     }
 
+    if (match(p, TOK_FOR)) {
+        /* Two forms share the `for` keyword:
+             python-style:  for x in <iterable> { ... }
+             c-style:       for <init> ; <cond> ; <update> { ... }
+           Disambiguate by peeking for `IDENT in` before committing to c-style. */
+        if (check(p, TOK_IDENT)) {
+            Token id = p->current;
+            advance(p);                  /* current = lookahead */
+            if (match(p, TOK_IN)) {
+                Stmt *s = stmt_alloc(STMT_FOR_IN, line);
+                s->for_in.var      = token_to_str(id);
+                s->for_in.iterable = parse_expr(p);
+                expect(p, TOK_LBRACE, "Expected '{' after for-in iterable");
+                s->for_in.body = parse_block(p);
+                return s;
+            }
+            /* not for-in: restore the identifier for the c-style initializer */
+            p->pending     = p->current;
+            p->has_pending = 1;
+            p->current     = id;
+        }
+
+        Stmt *init = check(p, TOK_SEMICOLON) ? NULL : parse_stmt(p);
+        expect(p, TOK_SEMICOLON, "Expected ';' after for-loop initializer");
+        Expr *cond = check(p, TOK_SEMICOLON) ? NULL : parse_expr(p);
+        expect(p, TOK_SEMICOLON, "Expected ';' after for-loop condition");
+        Stmt *update = check(p, TOK_LBRACE) ? NULL : parse_stmt(p);
+        expect(p, TOK_LBRACE, "Expected '{' before for-loop body");
+
+        Stmt *s = stmt_alloc(STMT_FOR, line);
+        s->for_stmt.init      = init;
+        s->for_stmt.condition = cond;
+        s->for_stmt.update    = update;
+        s->for_stmt.body      = parse_block(p);
+        return s;
+    }
+
+    if (match(p, TOK_BREAK))    return stmt_alloc(STMT_BREAK, line);
+    if (match(p, TOK_CONTINUE)) return stmt_alloc(STMT_CONTINUE, line);
+
     /* A statement that begins with an identifier is one of:
-         TypeName var = expr   (struct-typed declaration: IDENT IDENT ...)
-         x = expr              (assignment)
+         name: type = expr     (typed declaration, TypeScript-style)
+         Type implement Iface  (interface conformance)
+         x = expr              (inferred declare-or-assign)
          p.x = expr            (field assignment)
          <expression>          (e.g. a call like print(...))
-       We peek one token past the leading identifier to spot the declaration
-       form; everything else is handled by parsing a full expression and then
-       checking for a trailing '='. */
+       We peek one token past the leading identifier to spot the first two
+       forms; everything else is handled by parsing a full expression and then
+       checking for a trailing assignment operator. */
     if (check(p, TOK_IDENT)) {
         Token first = p->current;
         advance(p);                     /* current = lookahead */
+        if (check(p, TOK_COLON)) {
+            /* typed declaration: `name: type = expr` */
+            advance(p);                 /* consume ':' */
+            TypeAnn *ann = parse_type_ann(p);
+            expect(p, TOK_EQ, "Expected '=' after declared type");
+            Stmt *s = stmt_alloc(STMT_VAR_DECL, line);
+            s->var_decl.type = ann->base;
+            s->var_decl.ann  = ann;
+            s->var_decl.name = token_to_str(first);
+            s->var_decl.init = parse_expr(p);
+            return s;
+        }
         if (check(p, TOK_IMPLEMENT)) {
             /* interface conformance: `Point implement Drawable { ... }` */
             return parse_implement(p, first, line);
-        }
-        if (check(p, TOK_IDENT)) {
-            /* user struct-typed declaration: `Point p = expr` */
-            char *var_name = token_to_str(p->current);
-            advance(p);
-            expect(p, TOK_EQ, "Expected '=' after variable name");
-            Stmt *s = stmt_alloc(STMT_VAR_DECL, line);
-            s->var_decl.type = TYPE_STRUCT;
-            s->var_decl.name = var_name;
-            s->var_decl.init = parse_expr(p);
-            return s;
         }
         /* not a declaration: restore the leading identifier for parse_expr */
         p->pending     = p->current;
@@ -583,30 +734,18 @@ static Stmt *parse_stmt(Parser *p) {
         p->current     = first;
     }
 
-    /* expression statement, or an assignment whose target is the expression */
+    /* expression statement, or an assignment whose target is the expression.
+       Supports plain `=`, compound `+= -= *= /= %=`, and `++`/`--`. */
     Expr *target = parse_expr(p);
-    if (match(p, TOK_EQ)) {
-        Expr *value = parse_expr(p);
-        if (target && target->kind == EXPR_IDENT) {
-            Stmt *s = stmt_alloc(STMT_ASSIGN, line);
-            s->assign.name  = target->ident;   /* steal the heap string */
-            s->assign.value = value;
-            free(target);                      /* free the shell, not its name */
-            return s;
-        }
-        if (target && target->kind == EXPR_FIELD) {
-            Stmt *s = stmt_alloc(STMT_FIELD_ASSIGN, line);
-            s->field_assign.object = target->field.object;  /* steal */
-            s->field_assign.name   = target->field.name;    /* steal */
-            s->field_assign.value  = value;
-            free(target);
-            return s;
-        }
-        error(p, "Invalid assignment target");
-        expr_free(target);
-        expr_free(value);
-        return NULL;
-    }
+
+    if (match(p, TOK_EQ))        return make_assign(p, target, "",  parse_expr(p), line);
+    if (match(p, TOK_PLUSEQ))    return make_assign(p, target, "+", parse_expr(p), line);
+    if (match(p, TOK_MINUSEQ))   return make_assign(p, target, "-", parse_expr(p), line);
+    if (match(p, TOK_STAREQ))    return make_assign(p, target, "*", parse_expr(p), line);
+    if (match(p, TOK_SLASHEQ))   return make_assign(p, target, "/", parse_expr(p), line);
+    if (match(p, TOK_PERCENTEQ)) return make_assign(p, target, "%", parse_expr(p), line);
+    if (match(p, TOK_PLUSPLUS))   return make_assign(p, target, "+", expr_one(line), line);
+    if (match(p, TOK_MINUSMINUS)) return make_assign(p, target, "-", expr_one(line), line);
 
     Stmt *s  = stmt_alloc(STMT_EXPR, line);
     s->expr  = target;

@@ -8,6 +8,7 @@
 typedef struct Env Env;
 
 struct Env {
+    GCHeader gc;      /* must stay first — the collector owns Env lifetimes   */
     char  *names[ENV_MAX_VARS];
     Value  values[ENV_MAX_VARS];
     int    count;
@@ -30,5 +31,14 @@ int   env_set(Env *e, const char *name, Value val);
 /* Mark every value held by every live scope. Called by the collector to root
    the variable graph. */
 void  env_gc_mark_roots(void);
+
+/* Mark this environment and everything it can reach (its values and its parent
+   chain). Called by the collector when a closure/module keeps a scope alive. */
+void  env_gc_mark(Env *e);
+
+/* Free an environment's private memory (its name strings). Called by the
+   collector's sweep when the env is no longer reachable; the values it held are
+   tracked objects reclaimed on their own. */
+void  env_gc_free(Env *e);
 
 #endif

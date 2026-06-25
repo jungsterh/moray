@@ -1,0 +1,50 @@
+# ── Declaring maps ────────────────────────────────────────────────
+# An untyped map literal associates scalar keys with values of any type.
+# (Strings may use 'single' or "double" quotes.)
+person = {'name': 'Ada', 'age': 36, 'active': true}
+
+# Declare the key and value types with map<key, value>. The annotation is
+# checked at declaration; here every value must be an int. (list<T> works the
+# same way, and types may nest — see `grid` below.)
+scores: map<string, int> = {"alice": 90, "bob": 75, "carol": 82}
+
+# Keys are not limited to strings — int (and float/bool) keys work too, and
+# `any` opts a value out of checking.
+grid: map<int, list<any>> = {1: [2, 5, 6], 2: ["a", true]}
+
+# Look things up by key, check membership, and ask for the size:
+print(person["name"])        # Ada
+print(has(person, "email"))  # false
+print(len(scores))           # 3
+print(grid[1])               # [2, 5, 6]
+
+# ── Iterating a map ───────────────────────────────────────────────
+# keys(m) / values(m) return lists, so they work with `for ... in`.
+print("-- keys --")
+for k in keys(scores) {
+    print(k)                 # alice / bob / carol
+}
+
+print("-- values --")
+for v in values(scores) {
+    print(v)                 # 90 / 75 / 82
+}
+
+# Iterate keys AND values together: index back into the map by key…
+print("-- key = value --")
+for k in keys(scores) {
+    print(k, scores[k])      # alice 90 / bob 75 / carol 82
+}
+
+# …or use items(m), which yields a [key, value] pair for each entry:
+print("-- items() --")
+for pair in items(grid) {
+    print(pair[0], "->", pair[1])   # 1 -> [2, 5, 6] / 2 -> [a, true]
+}
+
+# A small aggregation: sum all the values (inferred declaration).
+total = 0
+for v in values(scores) {
+    total += v
+}
+print("total:", total)       # total: 247

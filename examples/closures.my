@@ -1,0 +1,50 @@
+# --- Closures ---
+
+# A counter that captures and mutates its enclosing scope.
+fn make_counter() {
+    count = 0
+    fn inc() {
+        count += 1
+        return count
+    }
+    return inc
+}
+
+c1 = make_counter()
+c2 = make_counter()
+print(c1())   # 1
+print(c1())   # 2
+print(c1())   # 3
+print(c2())   # 1  (independent capture)
+
+# Functions are first-class values: pass them around.
+fn apply(f, x) {
+    return f(x)
+}
+fn double(n) { return n * 2 }
+print(apply(double, 21))   # 42
+
+# A closure capturing a parameter (adder factory).
+fn adder(n) {
+    fn add(x) { return x + n }
+    return add
+}
+add10 = adder(10)
+print(add10(5))    # 15
+print(adder(100)(1))  # 101
+
+# Closures over a shared list.
+fn make_stack() {
+    items = []
+    fn push_it(v) { push(items, v) }
+    fn size() { return len(items) }
+    pair = [push_it, size]
+    return pair
+}
+s = make_stack()
+pusher = s[0]
+sizer  = s[1]
+pusher(1)
+pusher(2)
+pusher(3)
+print(sizer())   # 3

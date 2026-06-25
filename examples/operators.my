@@ -1,0 +1,53 @@
+# Compound assignment and increment/decrement
+
+n = 10
+n += 5
+print(n)          # 15
+n -= 3
+print(n)          # 12
+n *= 2
+print(n)          # 24
+n /= 5
+print(n)          # 4.8   (/ always yields a float)
+n = 24
+n %= 7
+print(n)          # 3
+
+# increment / decrement
+i = 0
+i++
+i++
+print(i)          # 2
+i--
+print(i)          # 1
+
+# string concatenation with +=
+s = "Mor"
+s += "ay"
+print(s)          # Moray
+
+# compound ops drive loops nicely
+sum = 0
+for k = 0; k < 5; k++ {
+    sum += k
+}
+print(sum)        # 10
+
+# on struct fields
+struct Counter { value: int }
+c: Counter = Counter(0)
+c.value += 10
+print(c.value)    # 10
+c.value++
+print(c.value)    # 11
+c.value -= 4
+print(c.value)    # 7
+c.value *= 3
+print(c.value)    # 21
+
+# countdown with -- and a while loop
+countdown = 3
+while countdown > 0 {
+    print(countdown)   # 3 / 2 / 1
+    countdown--
+}

@@ -2,6 +2,19 @@
 #include <string.h>
 #include "ast.h"
 
+TypeAnn *typeann_alloc(MorayType base) {
+    TypeAnn *t = calloc(1, sizeof(TypeAnn));
+    t->base = base;
+    return t;
+}
+
+void typeann_free(TypeAnn *t) {
+    if (!t) return;
+    typeann_free(t->p0);
+    typeann_free(t->p1);
+    free(t);
+}
+
 Expr *expr_alloc(ExprKind kind, int line) {
     Expr *e = calloc(1, sizeof(Expr));
     e->kind = kind;
@@ -19,6 +32,7 @@ Stmt *stmt_alloc(StmtKind kind, int line) {
 void expr_free(Expr *e) {
     if (!e) return;
     switch (e->kind) {
+        case EXPR_STR:    free(e->str.ptr); break;
         case EXPR_IDENT:  free(e->ident); break;
         case EXPR_BINARY: expr_free(e->binary.left); expr_free(e->binary.right); break;
         case EXPR_UNARY:  expr_free(e->unary.right); break;
@@ -29,6 +43,14 @@ void expr_free(Expr *e) {
                 expr_free(e->call.args.data[i].value);
             }
             vector_free(&e->call.args);
+            break;
+        case EXPR_CALLV:
+            expr_free(e->callv.callee);
+            for (int i = 0; i < e->callv.args.len; i++) {
+                free(e->callv.args.data[i].name);
+                expr_free(e->callv.args.data[i].value);
+            }
+            vector_free(&e->callv.args);
             break;
         case EXPR_INDEX:
             expr_free(e->index.object);
@@ -69,6 +91,7 @@ void stmt_free(Stmt *s) {
     switch (s->kind) {
         case STMT_VAR_DECL:
             free(s->var_decl.name);
+            typeann_free(s->var_decl.ann);
             expr_free(s->var_decl.init);
             break;
         case STMT_ASSIGN:
@@ -83,6 +106,20 @@ void stmt_free(Stmt *s) {
         case STMT_WHILE:
             expr_free(s->while_stmt.condition);
             stmt_free(s->while_stmt.body);
+            break;
+        case STMT_FOR:
+            stmt_free(s->for_stmt.init);
+            expr_free(s->for_stmt.condition);
+            stmt_free(s->for_stmt.update);
+            stmt_free(s->for_stmt.body);
+            break;
+        case STMT_FOR_IN:
+            free(s->for_in.var);
+            expr_free(s->for_in.iterable);
+            stmt_free(s->for_in.body);
+            break;
+        case STMT_BREAK:
+        case STMT_CONTINUE:
             break;
         case STMT_RETURN: expr_free(s->ret.value); break;
         case STMT_FN_DEF:
@@ -109,6 +146,11 @@ void stmt_free(Stmt *s) {
             free(s->field_assign.name);
             expr_free(s->field_assign.value);
             break;
+        case STMT_INDEX_ASSIGN:
+            expr_free(s->index_assign.object);
+            expr_free(s->index_assign.index);
+            expr_free(s->index_assign.value);
+            break;
         case STMT_IMPL:
             free(s->impl.struct_name);
             for (int i = 0; i < s->impl.methods.len; i++)
@@ -127,6 +169,10 @@ void stmt_free(Stmt *s) {
             for (int i = 0; i < s->implement.methods.len; i++)
                 stmt_free(s->implement.methods.data[i]);
             vector_free(&s->implement.methods);
+            break;
+        case STMT_IMPORT:
+            free(s->import.path);
+            free(s->import.alias);
             break;
     }
     free(s);

@@ -43,6 +43,12 @@ char *gc_new_string_buffer(size_t nbytes) {
     return (char *)(h + 1);
 }
 
+/* Hand an environment to the collector. Env's first member is a GCHeader (see
+   env.h), so &e->gc is the object's header. */
+void gc_register_env(Env *e) {
+    gc_register(&e->gc, GC_ENV);
+}
+
 Value gc_protect(Value v) {
     if (g_protect_len >= g_protect_cap) {
         g_protect_cap = g_protect_cap == 0 ? 64 : g_protect_cap * 2;
@@ -60,8 +66,10 @@ void gc_pop(int n) {
 /* ── Mark ─────────────────────────────────────────────────────────── */
 
 static void gc_mark_map_contents(MorayMap *m) {
-    for (int i = 0; i < m->len; i++)
+    for (int i = 0; i < m->len; i++) {
+        gc_mark_value(m->pairs[i].key);    /* string keys are GC-managed */
         gc_mark_value(m->pairs[i].value);
+    }
 }
 
 void gc_mark_value(Value v) {
@@ -95,6 +103,16 @@ void gc_mark_value(Value v) {
             gc_mark_map_contents(v.strukt->fields);
             break;
         }
+        case VAL_FUNCTION: {
+            GCHeader *h = &v.func->gc;
+            if (h->mark) return;
+            h->mark = 1;
+            env_gc_mark(v.func->closure);   /* keep the captured scope alive */
+            break;
+        }
+        case VAL_MODULE:
+            env_gc_mark(v.menv);             /* the module's namespace scope */
+            break;
         default:
             break;   /* int/float/bool/null hold no heap memory */
     }
@@ -118,7 +136,8 @@ static void gc_free_object(GCHeader *h) {
         }
         case GC_MAP: {
             MorayMap *m = (MorayMap *)h;
-            for (int i = 0; i < m->len; i++) free(m->pairs[i].key);
+            /* Keys are GC-managed Values (string keys are tracked strings), so
+               they are reclaimed by their own sweep — do not free them here. */
             free(m->pairs);
             free(m);
             break;
@@ -131,6 +150,15 @@ static void gc_free_object(GCHeader *h) {
             free(s);
             break;
         }
+        case GC_FUNC:
+            /* def is AST-owned; closure is its own tracked object. */
+            free(h);
+            break;
+        case GC_ENV:
+            /* Env's variable values are tracked objects swept on their own; its
+               name strings are private and freed here. */
+            env_gc_free((Env *)h);
+            break;
     }
     g_obj_count--;
 }
@@ -231,39 +259,82 @@ Value val_map_empty(void) {
     return (Value){ VAL_MAP, .map = gc_new_map() };
 }
 
-void map_set(MorayMap *m, const char *key, Value v) {
-    /* update existing key if found */
-    for (int i = 0; i < m->len; i++) {
-        if (strcmp(m->pairs[i].key, key) == 0) {
-            value_free(m->pairs[i].value);
-            m->pairs[i].value = v;
-            return;
-        }
+/* Key equality mirrors the `==` operator: scalars compare by value, and
+   reference types (list/map/struct) by identity — the same heap object. */
+static int map_key_equal(Value a, Value b) {
+    if (a.type != b.type) return 0;
+    switch (a.type) {
+        case VAL_INT:    return a.integer  == b.integer;
+        case VAL_FLOAT:  return a.floating == b.floating;
+        case VAL_BOOL:   return a.boolean  == b.boolean;
+        case VAL_STRING: return strcmp(a.string, b.string) == 0;
+        case VAL_NULL:   return 1;
+        case VAL_LIST:   return a.list   == b.list;
+        case VAL_MAP:    return a.map    == b.map;
+        case VAL_STRUCT: return a.strukt == b.strukt;
+        case VAL_FUNCTION: return a.func == b.func;
+        case VAL_MODULE:   return a.menv == b.menv;
     }
-    /* insert new key */
+    return 0;
+}
+
+/* Grow the pair array if full, then return the slot index for a new pair. */
+static int map_reserve_slot(MorayMap *m) {
     if (m->len >= m->cap) {
         m->cap   = m->cap == 0 ? 8 : m->cap * 2;
         m->pairs = realloc(m->pairs, m->cap * sizeof(MapPair));
     }
-    m->pairs[m->len].key   = strdup(key);
-    m->pairs[m->len].value = v;
-    m->len++;
+    return m->len++;
 }
 
-int map_get(MorayMap *m, const char *key, Value *out) {
+void map_set(MorayMap *m, Value key, Value v) {
     for (int i = 0; i < m->len; i++) {
-        if (strcmp(m->pairs[i].key, key) == 0) {
-            *out = m->pairs[i].value;
-            return 1;
+        if (map_key_equal(m->pairs[i].key, key)) {
+            m->pairs[i].value = v;   /* update existing */
+            return;
         }
     }
+    int i = map_reserve_slot(m);
+    m->pairs[i].key   = key;
+    m->pairs[i].value = v;
+}
+
+int map_get(MorayMap *m, Value key, Value *out) {
+    for (int i = 0; i < m->len; i++)
+        if (map_key_equal(m->pairs[i].key, key)) { *out = m->pairs[i].value; return 1; }
     return 0;
 }
 
-int map_has(MorayMap *m, const char *key) {
+int map_has(MorayMap *m, Value key) {
     for (int i = 0; i < m->len; i++)
-        if (strcmp(m->pairs[i].key, key) == 0) return 1;
+        if (map_key_equal(m->pairs[i].key, key)) return 1;
     return 0;
+}
+
+/* ── String-keyed helpers (used for struct fields) ────────────────────
+ * Structs store their fields in a MorayMap keyed by the field name. These
+ * compare against a C string without allocating on lookup; only inserting a
+ * brand-new field allocates a GC string for the key. */
+
+static int map_get_str(MorayMap *m, const char *key, Value *out) {
+    for (int i = 0; i < m->len; i++)
+        if (m->pairs[i].key.type == VAL_STRING &&
+            strcmp(m->pairs[i].key.string, key) == 0) { *out = m->pairs[i].value; return 1; }
+    return 0;
+}
+
+static int map_has_str(MorayMap *m, const char *key) {
+    Value out;
+    return map_get_str(m, key, &out);
+}
+
+static void map_set_str(MorayMap *m, const char *key, Value v) {
+    for (int i = 0; i < m->len; i++)
+        if (m->pairs[i].key.type == VAL_STRING &&
+            strcmp(m->pairs[i].key.string, key) == 0) { m->pairs[i].value = v; return; }
+    int i = map_reserve_slot(m);
+    m->pairs[i].key   = val_string(key, (int)strlen(key));
+    m->pairs[i].value = v;
 }
 
 /* ── Struct ───────────────────────────────────────────────────────── */
@@ -280,9 +351,19 @@ Value val_struct(const char *type_name) {
     return (Value){ VAL_STRUCT, .strukt = s };
 }
 
-void struct_set(MorayStruct *s, const char *field, Value v) { map_set(s->fields, field, v); }
-int  struct_get(MorayStruct *s, const char *field, Value *out) { return map_get(s->fields, field, out); }
-int  struct_has(MorayStruct *s, const char *field) { return map_has(s->fields, field); }
+/* ── Function (closure) ───────────────────────────────────────────── */
+
+Value val_function(Stmt *def, Env *closure) {
+    MorayFunc *f = calloc(1, sizeof(MorayFunc));
+    gc_register(&f->gc, GC_FUNC);
+    f->def     = def;
+    f->closure = closure;
+    return (Value){ VAL_FUNCTION, .func = f };
+}
+
+void struct_set(MorayStruct *s, const char *field, Value v) { map_set_str(s->fields, field, v); }
+int  struct_get(MorayStruct *s, const char *field, Value *out) { return map_get_str(s->fields, field, out); }
+int  struct_has(MorayStruct *s, const char *field) { return map_has_str(s->fields, field); }
 
 /* ── Shared free / print ──────────────────────────────────────────── */
 
@@ -319,7 +400,10 @@ void value_print(Value v) {
             printf("{");
             for (int i = 0; i < v.map->len; i++) {
                 if (i > 0) printf(", ");
-                printf("\"%s\": ", v.map->pairs[i].key);
+                Value k = v.map->pairs[i].key;
+                if (k.type == VAL_STRING) printf("\"%s\"", k.string);
+                else                      value_print(k);
+                printf(": ");
                 value_print(v.map->pairs[i].value);
             }
             printf("}");
@@ -328,11 +412,13 @@ void value_print(Value v) {
             printf("%s(", v.strukt->type_name);
             for (int i = 0; i < v.strukt->fields->len; i++) {
                 if (i > 0) printf(", ");
-                printf("%s: ", v.strukt->fields->pairs[i].key);
+                printf("%s: ", v.strukt->fields->pairs[i].key.string);  /* field keys are strings */
                 value_print(v.strukt->fields->pairs[i].value);
             }
             printf(")");
             break;
+        case VAL_FUNCTION: printf("<function>"); break;
+        case VAL_MODULE:   printf("<module>");   break;
     }
 }
 
@@ -346,6 +432,8 @@ const char *value_type_name(ValueType t) {
         case VAL_LIST:   return "list";
         case VAL_MAP:    return "map";
         case VAL_STRUCT: return "struct";   /* type() reports the instance's type name instead */
+        case VAL_FUNCTION: return "function";
+        case VAL_MODULE:   return "module";
     }
     return "?";
 }

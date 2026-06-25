@@ -3,12 +3,12 @@
 # arguments, containers under construction, aliasing across scopes).
 
 struct Box {
-    int n
-    list items
+    n: int
+    items: list
 }
 
 impl Box {
-    fn grow(self, string label) {
+    fn grow(self, label: string) {
         # builds a fresh list and string, returns the struct (reference)
         push(self.items, label)
         self.n = self.n + 1
@@ -20,9 +20,9 @@ impl Box {
 }
 
 # A function that returns a freshly built list (return-value protection).
-fn make_list(int k) {
-    list out = []
-    int i = 0
+fn make_list(k: int) {
+    out = []
+    i = 0
     while i < k {
         push(out, i * i)
         i = i + 1
@@ -31,9 +31,9 @@ fn make_list(int k) {
 }
 
 # Returns a fresh string built by concatenation in a loop.
-fn repeat(string s, int times) {
-    string acc = ""
-    int i = 0
+fn repeat(s: string, times: int) {
+    acc = ""
+    i = 0
     while i < times {
         acc = acc + s
         i = i + 1
@@ -41,18 +41,18 @@ fn repeat(string s, int times) {
     return acc
 }
 
-fn add(int a, int b) {
+fn add(a: int, b: int) {
     return a + b
 }
 
 # 1) Tight loop generating garbage: each iteration allocates lists, maps,
 #    strings and structs that go out of scope, forcing collections.
-int round = 0
-int checksum = 0
+round = 0
+checksum = 0
 while round < 2000 {
-    list temp = make_list(8)
-    map m = {"label": repeat("x", 5), "size": len(temp)}
-    Box b = Box(0, [])
+    temp = make_list(8)
+    m = {"label": repeat("x", 5), "size": len(temp)}
+    b: Box = Box(0, [])
     b.grow(m["label"])
     checksum = checksum + temp[7] + m["size"] + b.report()
     round = round + 1
@@ -64,8 +64,8 @@ print(add(add(make_list(3)[2], len(make_list(5))), len(repeat("ab", 4))))
                              # add(add(4, 5), 8) = 17
 
 # 3) Aliasing across scopes survives collection.
-Box shared = Box(0, [])
-int k = 0
+shared: Box = Box(0, [])
+k = 0
 while k < 500 {
     shared.grow("item")
     k = k + 1
@@ -74,11 +74,11 @@ print(shared.report())       # 500
 print(len(shared.items))     # 500
 
 # 4) A returned struct kept past many later collections still works.
-Box keeper = Box(0, [])
+keeper: Box = Box(0, [])
 keeper.grow("a")
-int junk = 0
+junk = 0
 while junk < 1000 {
-    list throwaway = make_list(4)
+    throwaway = make_list(4)
     junk = junk + 1 + throwaway[0]
 }
 print(keeper.report())       # 1  (survived all the churn)

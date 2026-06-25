@@ -9,12 +9,26 @@ static Env *g_live_envs = NULL;
 
 void env_gc_mark_roots(void) {
     for (Env *e = g_live_envs; e != NULL; e = e->gc_link)
-        for (int i = 0; i < e->count; i++)
-            gc_mark_value(e->values[i]);
+        env_gc_mark(e);
+}
+
+void env_gc_mark(Env *e) {
+    if (!e || e->gc.mark) return;       /* stop on cycles / already visited */
+    e->gc.mark = 1;
+    for (int i = 0; i < e->count; i++)
+        gc_mark_value(e->values[i]);
+    env_gc_mark(e->parent);             /* the lexical chain stays reachable */
+}
+
+void env_gc_free(Env *e) {
+    for (int i = 0; i < e->count; i++)
+        free(e->names[i]);
+    free(e);
 }
 
 Env *env_new(Env *parent) {
     Env *e      = calloc(1, sizeof(Env));
+    gc_register_env(e);          /* the collector now owns this env's lifetime */
     e->parent   = parent;
     e->gc_link  = g_live_envs;   /* register as a live root */
     g_live_envs = e;
@@ -22,9 +36,11 @@ Env *env_new(Env *parent) {
 }
 
 void env_free(Env *e) {
-    /* Unlink from the root registry first: once a scope is gone its variables
-       are no longer roots, so any object reachable only through it becomes
-       collectible. */
+    /* A scope is "discarded" only as a *root*: we unlink it from the live-root
+       registry so its variables stop rooting the object graph. The Env itself is
+       a GC object — if a closure or module still captures it, it stays alive and
+       is reclaimed later; otherwise the collection below frees it. We must NOT
+       free it here. */
     if (g_live_envs == e) {
         g_live_envs = e->gc_link;
     } else {
@@ -32,14 +48,7 @@ void env_free(Env *e) {
             if (p->gc_link == e) { p->gc_link = e->gc_link; break; }
         }
     }
-
-    /* The names are private to this scope; free them. The values are shared by
-       handle and owned by the collector, so we never free them here — we just
-       drop our references and let a collection reclaim whatever is now
-       unreachable. */
-    for (int i = 0; i < e->count; i++)
-        free(e->names[i]);
-    free(e);
+    e->gc_link = NULL;
 
     gc_maybe_collect();
 }

@@ -1,0 +1,23 @@
+# A small module: functions + a struct type + module-level state.
+
+pi = 3.14159
+
+fn add(a, b) { return a + b }
+fn square(n) { return n * n }
+
+# Uses another function from the same module (resolves in the module scope).
+fn circle_area(r) { return pi * square(r) }
+
+struct Point {
+    x: int
+    y: int
+}
+
+fn manhattan(p: Point) { return p.x + p.y }
+
+# A closure created inside the module, exported as a value.
+fn make_adder(n) {
+    fn go(x) { return x + n }
+    return go
+}
+inc = make_adder(1)
